@@ -28,7 +28,7 @@ jobs:
 
           Restart-Service TermService -Force
 
-      - name: Create RDP User
+      - name: Create RDP User and Save & Exit shortcut
         run: |
           $username = "RDP"
           $password = "Root@12345"
@@ -44,6 +44,13 @@ jobs:
 
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+          # Create a "Save & Exit" button on the desktop
+          $batContent = 'powershell -NoLogo -NonInteractive -Command "New-Item C:\stop-rdp.txt -ItemType File -Force | Out-Null"'
+          $desktopPath = "C:\Users\RDP\Desktop"
+          New-Item -ItemType Directory -Force -Path $desktopPath | Out-Null
+          $batPath = Join-Path $desktopPath "Save & Exit.bat"
+          Set-Content -Path $batPath -Value $batContent -Encoding ASCII
 
       - name: Install Tailscale
         run: |
@@ -82,9 +89,44 @@ jobs:
           Write-Host " USER: RDP"
           Write-Host " PASS: Root@12345"
           Write-Host "=============================="
+          Write-Host ""
+          Write-Host "To save and exit any time, double-click 'Save & Exit.bat' on the Desktop."
+          Write-Host "If you do nothing, it will auto-save near the end of the job."
 
-      - name: Keep Runner Alive
+      - name: Keep Runner Alive (auto-save or manual Save & Exit)
         run: |
+          $stopFile   = "C:\stop-rdp.txt"
+          $maxMinutes = 340  # keep < 3600 so there's time to upload artifacts
+          $start      = Get-Date
+
+          Write-Host "RDP session running."
+          Write-Host " - To save & exit now: double-click 'Save & Exit.bat' on the Desktop."
+          Write-Host " - Otherwise it will auto-save in about $maxMinutes minutes."
+
           while ($true) {
-              Start-Sleep 300
+              if (Test-Path $stopFile) {
+                  Write-Host "Stop file detected. Saving work..."
+                  break
+              }
+
+              $elapsed = (Get-Date) - $start
+              if ($elapsed -gt (New-TimeSpan -Minutes $maxMinutes)) {
+                  Write-Host "Max session time reached. Auto-saving..."
+                  break
+              }
+
+              Start-Sleep -Seconds 30
           }
+
+      - name: Upload RDP work as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-c-drive-work-${{ github.run_id }}
+          path: |
+            C:\Users\RDP
+          # Add more paths if you work outside your profile, e.g.:
+          #   C:\Work
+          #   C:\Games
+          if-no-files-found: ignore
+          retention-days: 7

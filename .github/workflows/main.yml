@@ -9,35 +9,25 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Enable Desktop + Firewall
+      - name: Allow VNC Firewall
         run: |
-          netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5901
+          netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
 
-      - name: Create User
+      - name: Install UltraVNC
         run: |
-          $username = "VNC"
-          $password = "Root@12345"
-          $secure = ConvertTo-SecureString $password -AsPlainText -Force
-
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-              Remove-LocalUser -Name $username
-          }
-
-          New-LocalUser -Name $username -Password $secure -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-
-      - name: Install TightVNC
-        run: |
-          $url = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
-          $out = "$env:TEMP\tightvnc.msi"
+          $url = "https://www.uvnc.com/component/jdownloads/send/0-/448-ultravnc-1-4-3-setup-x64-exe.html"
+          $out = "$env:TEMP\uvnc.exe"
           Invoke-WebRequest $url -OutFile $out
-          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet ADDLOCAL=Server" -Wait
+          Start-Process $out -ArgumentList "/silent" -Wait
 
-          # Set VNC password
-          reg add "HKLM\Software\TightVNC\Server" /v Password /t REG_BINARY /d 763643313233 /f
-          reg add "HKLM\Software\TightVNC\Server" /v AcceptRfbConnections /t REG_DWORD /d 1 /f
+      - name: Set VNC Password (r1234567) and Start Service
+        run: |
+          $setpass = "C:\Program Files\UltraVNC\setpasswd.exe"
 
-          Restart-Service tvnserver -Force
+          & $setpass r1234567
+
+          sc config uvnc_service start= auto
+          Start-Service uvnc_service
 
       - name: Install Cloudflared
         run: |
@@ -48,15 +38,17 @@ jobs:
       - name: Start Cloudflare TCP Tunnel (VNC)
         run: |
           Start-Process -NoNewWindow -FilePath "C:\cloudflared.exe" `
-            -ArgumentList "tunnel --url tcp://localhost:5901"
+            -ArgumentList "tunnel --url tcp://localhost:5900"
 
-      - name: Show VNC Details
+      - name: Show VNC Info
         run: |
           Write-Host "=============================="
           Write-Host " VNC READY (Cloudflare TCP)"
-          Write-Host " Port: 5901"
-          Write-Host " VNC Password: vnc123"
+          Write-Host " Port: 5900"
+          Write-Host " Password: r1234567"
           Write-Host "=============================="
+          Write-Host ""
+          Write-Host "Copy the trycloudflare hostname from logs."
 
       - name: Keep Runner Alive
         run: |

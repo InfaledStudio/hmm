@@ -13,21 +13,30 @@ jobs:
         run: |
           netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
 
-      - name: Install UltraVNC
+      - name: Download UltraVNC Installer (REAL EXE)
         run: |
-          $url = "https://www.uvnc.com/component/jdownloads/send/0-/448-ultravnc-1-4-3-setup-x64-exe.html"
-          $out = "$env:TEMP\uvnc.exe"
-          Invoke-WebRequest $url -OutFile $out
-          Start-Process $out -ArgumentList "/silent" -Wait
+          $url = "https://www.uvnc.com/downloads/ultravnc/1440/UltraVNC_1_4_4_0_X64_Setup.exe"
+          $out = "$env:TEMP\ultravnc.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+
+      - name: Install UltraVNC (Service Mode)
+        run: |
+          Start-Process "$env:TEMP\ultravnc.exe" `
+            -ArgumentList "/silent" `
+            -Wait
 
       - name: Set VNC Password (r1234567) and Start Service
         run: |
           $setpass = "C:\Program Files\UltraVNC\setpasswd.exe"
 
-          & $setpass r1234567
+          & "$setpass" r1234567
 
           sc config uvnc_service start= auto
           Start-Service uvnc_service
+
+      - name: Verify VNC is Listening
+        run: |
+          netstat -ano | findstr 5900
 
       - name: Install Cloudflared
         run: |
@@ -37,7 +46,8 @@ jobs:
 
       - name: Start Cloudflare TCP Tunnel (VNC)
         run: |
-          Start-Process -NoNewWindow -FilePath "C:\cloudflared.exe" `
+          Start-Process -NoNewWindow `
+            -FilePath "C:\cloudflared.exe" `
             -ArgumentList "tunnel --url tcp://localhost:5900"
 
       - name: Show VNC Info
@@ -48,7 +58,8 @@ jobs:
           Write-Host " Password: r1234567"
           Write-Host "=============================="
           Write-Host ""
-          Write-Host "Copy the trycloudflare hostname from logs."
+          Write-Host "👉 Copy the trycloudflare hostname from logs"
+          Write-Host "👉 Use cloudflared access tcp on your PC"
 
       - name: Keep Runner Alive
         run: |

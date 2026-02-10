@@ -1,68 +1,48 @@
-name: Kali VNC with Domain
-on: workflow_dispatch
+name: Kali/SSH via tmate
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_type:
+        description: 'Session type'
+        required: true
+        default: 'kali'
+        type: choice
+        options:
+          - kali
+          - ubuntu
+          - debug
+      session_duration:
+        description: 'Session duration in minutes (max 360)'
+        required: false
+        default: '60'
 
 jobs:
-  kali:
+  kali-ssh-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 370
     
     steps:
-      - name: Start Kali VNC
+      - name: Setup tmate session
+        id: tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          detached: true
+
+      - name: Wait for connection
         run: |
-          docker run -d --name kali -p 6080:6080 kalilinux/kali-rolling \
-            bash -c "apt update && apt install -y tightvncserver novnc && \
-            mkdir -p /root/.vnc && echo 'kali123' | vncpasswd -f && \
-            echo 'startxfce4 &' > /root/.vnc/xstartup && chmod +x /root/.vnc/xstartup && \
-            vncserver :1 && websockify 6080 localhost:5901"
-      
-      - name: Install Cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
-          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-      
-      - name: Start Cloudflare Tunnel
-        run: |
-          # Start tunnel and get domain
-          nohup cloudflared tunnel --url http://localhost:6080 2>&1 | tee tunnel.log &
-          sleep 10
+          echo "SSH session is ready!"
+          echo "=============================================="
+          echo "Connect via SSH using one of these commands:"
+          echo "----------------------------------------------"
+          echo "SSH: ssh ${{ steps.tmate.outputs.ssh }}"
+          echo ""
+          echo "Web SSH: ${{ steps.tmate.outputs.web }}"
+          echo "=============================================="
+          echo ""
+          echo "Session will auto-close after ${{ github.event.inputs.session_duration || '60' }} minutes"
+          echo "Press Ctrl+C here to end session early"
           
-          # Get the trycloudflare.com domain
-          DOMAIN=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1)
-          if [ ! -z "$DOMAIN" ]; then
-            echo "YOUR_DOMAIN=$DOMAIN" >> $GITHUB_ENV
-            echo "✅ Your domain: $DOMAIN"
-          else
-            echo "⚠️ Could not get domain, checking logs..."
-            tail -20 tunnel.log
-          fi
-      
-      - name: Show Domain
-        run: |
-          echo ""
-          echo "=========================================="
-          echo "       KALI VNC WITH DOMAIN"
-          echo "=========================================="
-          echo ""
-          echo "🌐 YOUR DOMAIN:"
-          if [ ! -z "$YOUR_DOMAIN" ]; then
-            echo "$YOUR_DOMAIN/vnc.html"
-          else
-            echo "Could not get domain, use local access below"
-          fi
-          echo ""
-          echo "🔐 PASSWORD: kali123"
-          echo ""
-          echo "📍 LOCAL ACCESS:"
-          echo "http://localhost:6080/vnc.html"
-          echo ""
-          echo "⏰ DURATION: 6 hours"
-          echo "=========================================="
-      
-      - name: Keep alive
-        run: sleep 21600
-      
-      - name: Cleanup
-        run: |
-          docker rm -f kali
-          pkill cloudflared || true
+          # Keep alive for specified duration
+          sleep $(( ${{ github.event.inputs.session_duration || '60' }} * 60 ))

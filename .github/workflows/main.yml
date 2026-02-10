@@ -18,7 +18,7 @@ jobs:
           # Run Kali container with tools
           docker run -d \
             --name kali-container \
-            --hostname kali-gh-actions \
+            --hostname kali \
             kalilinux/kali-rolling \
             /bin/bash -c "apt-get update && apt-get install -y \
               kali-linux-headless \

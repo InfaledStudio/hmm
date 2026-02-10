@@ -1,38 +1,43 @@
-name: VNC
+name: VNCon
 
-on:
+on: 
   workflow_dispatch:
 
 jobs:
   secure-vnc:
     runs-on: windows-latest
     timeout-minutes: 3600
-
+    
     steps:
       - name: Allow VNC Firewall
         run: |
           netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
 
-      - name: Download UltraVNC Installer (REAL EXE)
+      - name: Download UltraVNC Installer
         run: |
           $url = "https://www.uvnc.com/downloads/ultravnc/1440/UltraVNC_1_4_4_0_X64_Setup.exe"
           $out = "$env:TEMP\ultravnc.exe"
-          Invoke-WebRequest -Uri $url -OutFile $out
+          # -L follows redirects, -o specifies the output file
+          curl.exe -L -o $out $url
+          if (-not (Test-Path $out)) { throw "Download failed: File not found." }
 
       - name: Install UltraVNC (Service Mode)
         run: |
           Start-Process "$env:TEMP\ultravnc.exe" `
-            -ArgumentList "/silent" `
+            -ArgumentList "/silent", "/loadinf=setup.inf" `
             -Wait
 
-      - name: Set VNC Password (r1234567) and Start Service
+      - name: Set VNC Password and Start Service
         run: |
-          $setpass = "C:\Program Files\UltraVNC\setpasswd.exe"
-
-          & "$setpass" r1234567
-
-          sc config uvnc_service start= auto
-          Start-Service uvnc_service
+          # Note: UltraVNC might require the directory to exist before setting pass
+          $vncDir = "C:\Program Files\UltraVNC"
+          if (Test-Path "$vncDir\setpasswd.exe") {
+              & "$vncDir\setpasswd.exe" r1234567
+              sc.exe config uvnc_service start= auto
+              Start-Service uvnc_service
+          } else {
+              Write-Error "UltraVNC installation directory not found."
+          }
 
       - name: Verify VNC is Listening
         run: |
@@ -40,11 +45,9 @@ jobs:
 
       - name: Install Cloudflared
         run: |
-          Invoke-WebRequest `
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe `
-            -OutFile C:\cloudflared.exe
+          curl.exe -L -o C:\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
-      - name: Start Cloudflare TCP Tunnel (VNC)
+      - name: Start Cloudflare TCP Tunnel
         run: |
           Start-Process -NoNewWindow `
             -FilePath "C:\cloudflared.exe" `
@@ -57,10 +60,9 @@ jobs:
           Write-Host " Port: 5900"
           Write-Host " Password: r1234567"
           Write-Host "=============================="
-          Write-Host ""
-          Write-Host "👉 Copy the trycloudflare hostname from logs"
-          Write-Host "👉 Use cloudflared access tcp on your PC"
+          Write-Host "Check the logs above for the 'trycloudflare.com' address."
 
       - name: Keep Runner Alive
         run: |
-          Start-Sleep -Seconds 1800
+          # Sleeps for 6 hours (21600 seconds)
+          Start-Sleep -Seconds 21600

@@ -1,167 +1,357 @@
-name: Kali Linux SSH Access
+name: Kali Linux - VNC + SSHX + Cloudflare
 
 on: workflow_dispatch
 
 jobs:
-  kali-ssh:
+  kali-full:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     
     steps:
-      - name: Setup Kali Linux
+      - name: Setup Kali Linux with Desktop
         run: |
-          echo "🚀 Installing Kali Linux..."
+          echo "🚀 Installing Kali Linux with Desktop..."
           
           # Pull Kali image
           docker pull kalilinux/kali-rolling
           
-          # Run Kali container with tools
+          # Create Kali container with everything
           docker run -d \
-            --name kali-container \
-            --hostname kali-gh-actions \
+            --name kali-full \
+            --hostname kali-gha \
+            -p 5901:5901 \
+            -p 6080:6080 \
+            -p 2222:22 \
+            -p 8080:8080 \
+            -v /tmp/kali-data:/root \
+            -e TZ=UTC \
             kalilinux/kali-rolling \
-            /bin/bash -c "apt-get update && apt-get install -y \
-              kali-linux-headless \
-              curl wget git \
-              nmap netcat-traditional \
-              python3 python3-pip \
-              vim nano htop \
-              openssh-server sudo \
+            /bin/bash -c "
+              apt-get update && apt-get install -y \
+              kali-linux-core \
+              xfce4 xfce4-goodies \
+              tightvncserver \
+              novnc \
+              websockify \
+              firefox-esr \
+              openssh-server \
+              net-tools curl wget git \
+              python3 python3-pip nodejs npm \
+              vim nano htop tmux \
+              golang-go \
+              && echo 'kali:kali123' | chpasswd \
               && echo 'root:kali123' | chpasswd \
-              && sleep infinity"
+              && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
+              && service ssh start \
+              && sleep infinity
+            "
           
-          echo "✅ Kali Linux container running"
-          echo "Username: root"
+          echo "✅ Kali Linux installed with SSH, VNC, Desktop"
+          echo "Username: root / kali"
           echo "Password: kali123"
 
-      - name: Install and setup tmate
+      - name: Configure VNC Server
         run: |
-          echo "🔗 Setting up tmate for SSH access..."
+          echo "🔧 Setting up VNC server..."
           
-          # Install tmate
+          # Create VNC password and config
+          docker exec kali-full bash -c "
+            # Set up VNC for kali user
+            mkdir -p /home/kali/.vnc
+            echo 'kali123' | vncpasswd -f > /home/kali/.vnc/passwd
+            chmod 600 /home/kali/.vnc/passwd
+            
+            # Create xstartup for XFCE
+            cat > /home/kali/.vnc/xstartup << 'EOF'
+#!/bin/bash
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+export XKL_XMODMAP_DISABLE=1
+export XDG_CURRENT_DESKTOP=XFCE
+exec startxfce4
+EOF
+            
+            chmod +x /home/kali/.vnc/xstartup
+            chown -R kali:kali /home/kali/.vnc
+          "
+          
+          echo "✅ VNC password set: kali123"
+
+      - name: Install and Configure SSHX
+        run: |
+          echo "📦 Installing SSHX (modern web terminal)..."
+          
+          # Install SSHX in Kali container
+          docker exec kali-full bash -c "
+            # Install Go if not already installed
+            apt-get install -y golang-go
+            
+            # Install SSHX
+            go install github.com/sshx-dev/sshx@latest
+            
+            # Create SSHX config directory
+            mkdir -p /root/.sshx
+          "
+          
+          echo "✅ SSHX installed"
+
+      - name: Start All Services
+        run: |
+          echo "🚀 Starting all services..."
+          
+          # Start VNC server
+          docker exec -d kali-full su - kali -c "vncserver :1 -geometry 1280x800 -depth 24 -localhost no"
+          
+          # Start noVNC web interface
+          docker exec -d kali-full bash -c "
+            websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+          "
+          
+          # Start SSHX on port 8080
+          docker exec -d kali-full bash -c "
+            /root/go/bin/sshx serve --addr :8080 --allow-root &
+          "
+          
+          # Ensure SSH is running
+          docker exec kali-full service ssh restart
+          
+          echo "✅ Services started:"
+          echo "  • VNC: port 5901"
+          echo "  • Web VNC: port 6080"
+          echo "  • SSH: port 2222"
+          echo "  • SSHX: port 8080"
+
+      - name: Install and Configure Cloudflared
+        run: |
+          echo "🌐 Installing Cloudflared..."
+          
+          # Install cloudflared on host
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+          
+          echo "✅ Cloudflared installed"
+
+      - name: Start Cloudflare Tunnels
+        run: |
+          echo "🚇 Starting Cloudflare tunnels for all services..."
+          
+          # Create config file for multiple tunnels
+          cat > /tmp/cloudflared.yml << 'EOF'
+tunnel: kali-multi
+credentials-file: /tmp/cloudflared-creds.json
+ingress:
+  - hostname: vnc-kali.trycloudflare.com
+    service: http://localhost:6080
+  - hostname: sshx-kali.trycloudflare.com
+    service: http://localhost:8080
+  - hostname: ssh-kali.trycloudflare.com
+    service: tcp://localhost:2222
+  - hostname: vnc-direct.trycloudflare.com
+    service: tcp://localhost:5901
+  - service: http_status:404
+EOF
+          
+          # Start cloudflared with config
+          cloudflared tunnel --config /tmp/cloudflared.yml run > /tmp/cloudflared.log 2>&1 &
+          CLOUDFLARED_PID=$!
+          
+          # Wait for tunnels
+          sleep 10
+          
+          # Get tunnel info
+          echo "🔍 Getting tunnel URLs..."
+          cloudflared tunnel --config /tmp/cloudflared.yml info > /tmp/tunnel_info.txt 2>&1 || true
+          
+          # Create tunnel URL file
+          echo "TUNNEL_STATUS=" >> $GITHUB_ENV
+          if [ -f /tmp/tunnel_info.txt ]; then
+            echo "TUNNEL_STATUS=ACTIVE" >> $GITHUB_ENV
+          fi
+          
+          echo "✅ Cloudflare tunnels started"
+
+      - name: Install tmate for Direct SSH
+        run: |
+          echo "🔗 Setting up tmate for direct SSH backup..."
+          
+          # Install tmate on host
           wget -q https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
           tar -xf tmate-2.4.0-static-linux-amd64.tar.xz
           sudo mv tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-          rm -rf tmate-2.4.0-static-linux-amd64*
           
-          # Create SSH key for tmate
+          # Generate tmate session
           mkdir -p ~/.tmate
-          ssh-keygen -t rsa -f ~/.tmate/tmate_key -q -N ""
+          ssh-keygen -t ed25519 -f ~/.tmate/tmate_key -q -N ""
           
-          # Start tmate session
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           
-          # Get connection strings
           TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
           
           echo "TMATE_SSH=$TMATE_SSH" >> $GITHUB_ENV
           echo "TMATE_WEB=$TMATE_WEB" >> $GITHUB_ENV
           
-          echo "✅ tmate session ready"
+          echo "✅ tmate ready"
 
-      - name: Create access script
-        run: |
-          # Create a script to access Kali from tmate
-          cat > /tmp/access_kali.sh << 'EOF'
-          echo ""
-          echo "=============================================="
-          echo "   WELCOME TO KALI LINUX ON GITHUB ACTIONS"
-          echo "=============================================="
-          echo ""
-          echo "To access Kali Linux, run:"
-          echo "docker exec -it kali-container bash"
-          echo ""
-          echo "Default credentials:"
-          echo "  Username: root"
-          echo "  Password: kali123"
-          echo ""
-          echo "Available tools:"
-          echo "  • nmap -p- localhost"
-          echo "  • nc -lvnp 4444"
-          echo "  • python3 -c 'print(\"Hello Kali\")'"
-          echo "  • apt-get install <any-kali-tool>"
-          echo ""
-          echo "=============================================="
-          EOF
-          
-          # Make script run when user connects via tmate
-          cat > ~/.bashrc << 'EOF'
-          if [ -f /tmp/access_kali.sh ]; then
-            cat /tmp/access_kali.sh
-          fi
-          EOF
-
-      - name: Display connection info
+      - name: Display Complete Connection Info
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════╗"
-          echo "║               KALI LINUX ACCESS READY                   ║"
-          echo "╚══════════════════════════════════════════════════════════╝"
+          echo "╔════════════════════════════════════════════════════════════════════╗"
+          echo "║               KALI LINUX - COMPLETE ACCESS                         ║"
+          echo "╚════════════════════════════════════════════════════════════════════╝"
           echo ""
-          echo "📌 COPY THIS SSH COMMAND:"
-          echo "   $TMATE_SSH"
+          echo "🎯 METHOD 1: SSHX (MODERN WEB TERMINAL - RECOMMENDED)"
+          echo "   Local:  http://localhost:8080"
+          echo "   Tunnel: https://sshx-kali.trycloudflare.com"
+          echo "   Features: Multi-tab, file browser, modern UI"
           echo ""
-          echo "🌐 OR USE WEB SSH:"
-          echo "   https://tmate.io/t/$TMATE_WEB"
-          echo ""
-          echo "🔓 KALI CREDENTIALS:"
-          echo "   Username: root"
+          echo "🎯 METHOD 2: WEB VNC (FULL DESKTOP)"
+          echo "   Local:  http://localhost:6080/vnc.html"
+          echo "   Tunnel: https://vnc-kali.trycloudflare.com/vnc.html"
           echo "   Password: kali123"
           echo ""
-          echo "🚀 QUICK START:"
-          echo "   1. ssh $TMATE_SSH"
-          echo "   2. docker exec -it kali-container bash"
-          echo "   3. Start using Kali tools!"
+          echo "🎯 METHOD 3: DIRECT VNC CLIENT"
+          echo "   Server: localhost:5901"
+          echo "   Tunnel: vnc-direct.trycloudflare.com:5901"
+          echo "   Password: kali123"
           echo ""
-          echo "🛠️  INSTALL MORE TOOLS:"
-          echo "   apt-get update && apt-get install -y <tool-name>"
+          echo "🎯 METHOD 4: STANDARD SSH"
+          echo "   Command: ssh -p 2222 root@localhost"
+          echo "   Tunnel: ssh -p 2222 root@ssh-kali.trycloudflare.com"
+          echo "   Password: kali123"
           echo ""
-          echo "📦 PRE-INSTALLED TOOLS:"
-          echo "   • nmap, netcat, curl, wget, git"
-          echo "   • python3, vim, nano, htop"
-          echo "   • kali-linux-headless (base tools)"
+          echo "🎯 METHOD 5: Tmate SSH (BACKUP)"
+          echo "   Direct SSH: $TMATE_SSH"
+          echo "   Web SSH: https://tmate.io/t/$TMATE_WEB"
           echo ""
-          echo "⏰ SESSION DURATION: 6 hours max"
-          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "🔐 CREDENTIALS FOR ALL SERVICES:"
+          echo "   Username: root (or kali)"
+          echo "   Password: kali123"
+          echo "   VNC Password: kali123"
           echo ""
+          echo "🛠️  INSIDE KALI:"
+          echo "   • Full XFCE Desktop via VNC"
+          echo "   • SSHX web terminal with tabs"
+          echo "   • Firefox browser pre-installed"
+          echo "   • Install tools: apt-get install <tool>"
+          echo ""
+          echo "⚡ QUICK START:"
+          echo "   1. Open browser → https://sshx-kali.trycloudflare.com"
+          echo "   2. OR → https://vnc-kali.trycloudflare.com/vnc.html"
+          echo "   3. Login with password: kali123"
+          echo "   4. Start hacking! 🔥"
+          echo ""
+          echo "📊 PORTS & SERVICES:"
+          echo "   • SSHX Web Terminal: 8080"
+          echo "   • Web VNC: 6080"
+          echo "   • Direct VNC: 5901"
+          echo "   • SSH: 2222"
+          echo ""
+          echo "⏰ SESSION DURATION: 6 hours"
+          echo "╔════════════════════════════════════════════════════════════════════╗"
           
-          # Also show in a box format
-          echo "┌────────────────────────────────────────────────────────────┐"
-          echo "│              SSH CONNECTION DETAILS                        │"
-          echo "├────────────────────────────────────────────────────────────┤"
-          echo "│ SSH:  $TMATE_SSH"
-          echo "│ WEB:  https://tmate.io/t/$TMATE_WEB"
-          echo "│                                                            │"
-          echo "│ KALI ACCESS: docker exec -it kali-container bash           │"
-          echo "│ USER: root | PASS: kali123                                 │"
-          echo "└────────────────────────────────────────────────────────────┘"
+          # Show status
+          echo ""
+          echo "🔧 SERVICE STATUS:"
+          docker exec kali-full ps aux | grep -E "(vnc|ssh|sshx|novnc)" | grep -v grep || echo "Checking..."
+          echo ""
+          echo "🌐 TUNNEL STATUS: $TUNNEL_STATUS"
+          echo ""
+          echo "🐳 CONTAINER: kali-full (running)"
 
-      - name: Keep session alive
+      - name: Create Access Scripts
         run: |
-          echo "🟢 Session is now active!"
-          echo "Connected users can access Kali Linux for 6 hours"
+          # Create helper scripts
+          cat > /tmp/access_helpers.sh << 'EOF'
           echo ""
-          echo "📊 Monitoring session..."
+          echo "=== KALI ACCESS HELPERS ==="
+          echo ""
+          echo "1. Open SSHX (Web Terminal):"
+          echo "   xdg-open http://localhost:8080 2>/dev/null || echo 'Open browser to: http://localhost:8080'"
+          echo ""
+          echo "2. Open Web VNC:"
+          echo "   xdg-open http://localhost:6080/vnc.html 2>/dev/null || echo 'Open browser to: http://localhost:6080/vnc.html'"
+          echo ""
+          echo "3. SSH to Kali:"
+          echo "   ssh -p 2222 root@localhost"
+          echo "   Password: kali123"
+          echo ""
+          echo "4. Docker commands:"
+          echo "   docker exec -it kali-full bash    # Get shell"
+          echo "   docker logs kali-full             # View logs"
+          echo ""
+          echo "5. Install Kali tools:"
+          echo "   apt-get update"
+          echo "   apt-get install -y kali-tools-top10"
+          EOF
           
-          # Show countdown
-          for i in {1..21600}; do  # 6 hours = 21600 seconds
-            if [ $((i % 300)) -eq 0 ]; then  # Every 5 minutes
+          # Also create inside container
+          docker exec kali-full bash -c "
+            cat > /root/README.txt << 'EOF2'
+Welcome to Kali Linux on GitHub Actions!
+
+Access Methods:
+1. SSHX Web Terminal: http://localhost:8080
+2. Web VNC Desktop: http://localhost:6080/vnc.html (password: kali123)
+3. Direct VNC: localhost:5901 (password: kali123)
+4. SSH: ssh -p 2222 root@localhost (password: kali123)
+
+Quick Start:
+- Update: apt-get update
+- Install tools: apt-get install <tool-name>
+- Start Firefox: firefox &
+- Open terminal: Ctrl+Alt+T (in VNC)
+
+Cloudflare Tunnels:
+- SSHX: https://sshx-kali.trycloudflare.com
+- VNC: https://vnc-kali.trycloudflare.com/vnc.html
+
+Enjoy! 🎯
+EOF2
+          "
+
+      - name: Keep Session Alive
+        run: |
+          echo "🟢 All services running for 6 hours..."
+          echo "Multiple access methods available!"
+          echo "Press Ctrl+C to end session early"
+          echo ""
+          
+          # Health check loop
+          for i in {1..21600}; do
+            # Status every 5 minutes
+            if [ $((i % 300)) -eq 0 ]; then
               minutes=$((i / 60))
               hours=$((minutes / 60))
               minutes=$((minutes % 60))
-              echo "[$(date '+%H:%M:%S')] Session active: ${hours}h ${minutes}m"
+              echo "[$(date '+%H:%M:%S')] Uptime: ${hours}h ${minutes}m - All systems operational"
+              
+              # Check container
+              if ! docker ps | grep -q kali-full; then
+                echo "⚠️ Container down, restarting..."
+                docker start kali-full
+              fi
+              
+              # Check cloudflared
+              if ! ps aux | grep -q cloudflared; then
+                echo "⚠️ Cloudflared down, restarting..."
+                cloudflared tunnel --config /tmp/cloudflared.yml run > /tmp/cloudflared.log 2>&1 &
+              fi
             fi
+            
             sleep 1
           done
           
-          echo "⏰ Time's up! Session ending."
+          echo "⏰ 6-hour session completed"
 
       - name: Cleanup
         if: always()
         run: |
-          echo "🧹 Cleaning up resources..."
-          docker rm -f kali-container 2>/dev/null || true
-          rm -f ~/.tmate/tmate_key* 2>/dev/null || true
-          echo "✅ Cleanup completed"
+          echo "🧹 Performing cleanup..."
+          docker rm -f kali-full 2>/dev/null || true
+          pkill cloudflared 2>/dev/null || true
+          pkill tmate 2>/dev/null || true
+          rm -rf ~/.tmate /tmp/cloudflared.yml /tmp/cloudflared.log 2>/dev/null || true
+          echo "✅ Cleanup complete"

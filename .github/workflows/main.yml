@@ -1,321 +1,111 @@
-name: Kali Linux - VNC + Cloudflare
+name: Kali VNC with Cloudflare
 
 on: workflow_dispatch
 
 jobs:
-  kali-vnc-cloudflare:
+  kali-vnc:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     
     steps:
-      - name: Setup Kali with VNC Desktop
+      - name: Start Kali Linux
         run: |
-          echo "🚀 Installing Kali Linux with VNC..."
+          echo "🚀 Starting Kali Linux container..."
+          docker run -d --name kali-vnc kalilinux/kali-rolling sleep infinity
+          echo "✅ Kali container started"
+
+      - name: Install VNC in Kali
+        run: |
+          echo "📦 Installing VNC server..."
+          docker exec kali-vnc apt-get update
+          docker exec kali-vnc apt-get install -y tightvncserver novnc websockify xfce4 firefox-esr
           
-          # Pull Kali image
-          docker pull kalilinux/kali-rolling
+          echo "🔧 Setting up VNC password..."
+          docker exec kali-vnc bash -c "mkdir -p /root/.vnc && echo 'kali123' | vncpasswd -f > /root/.vnc/passwd"
+          docker exec kali-vnc chmod 600 /root/.vnc/passwd
           
-          # Create Kali container with VNC
-          docker run -d \
-            --name kali-vnc \
-            --hostname kali-cloudflare \
-            -p 5901:5901 \
-            -p 6080:6080 \
-            kalilinux/kali-rolling \
-            /bin/bash -c "
-              # Update and install packages
-              apt-get update && apt-get install -y \
-                kali-linux-core \
-                tightvncserver \
-                novnc \
-                websockify \
-                xfce4 xfce4-goodies \
-                firefox-esr \
-                net-tools curl wget git \
-                python3 python3-pip \
-                vim nano htop \
-              
-              # Create VNC password
-              mkdir -p /root/.vnc
-              echo -e 'kali123\nkali123\nn' | vncpasswd
-              echo 'kali123' | vncpasswd -f > /root/.vnc/passwd
-              chmod 600 /root/.vnc/passwd
-              
-              # Create xstartup for XFCE
-              cat > /root/.vnc/xstartup << 'EOF'
-#!/bin/bash
-xrdb $HOME/.Xresources
-startxfce4 &
-EOF
-              chmod +x /root/.vnc/xstartup
-              
-              # Start VNC server
-              vncserver :1 -geometry 1280x720 -depth 24 -localhost no
-              
-              # Start noVNC
-              websockify --web /usr/share/novnc/ 6080 localhost:5901 &
-              
-              # Keep container running
-              tail -f /dev/null
-            "
+          echo "✅ VNC setup complete"
+
+      - name: Start VNC Services
+        run: |
+          echo "🚀 Starting VNC server..."
           
-          echo "✅ Kali VNC container running"
+          # Create xstartup script
+          docker exec kali-vnc bash -c "echo '#!/bin/bash
+          xrdb \$HOME/.Xresources
+          startxfce4 &' > /root/.vnc/xstartup"
+          docker exec kali-vnc chmod +x /root/.vnc/xstartup
+          
+          # Start VNC
+          docker exec -d kali-vnc vncserver :1 -geometry 1280x720 -depth 24
+          
+          # Start noVNC
+          docker exec -d kali-vnc websockify --web /usr/share/novnc/ 6080 localhost:5901
+          
+          echo "✅ VNC services started"
           echo "VNC Password: kali123"
-          sleep 5
 
       - name: Install Cloudflared
         run: |
-          echo "📦 Installing Cloudflared..."
-          
-          # Download cloudflared
+          echo "🌐 Installing Cloudflared..."
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared-linux-amd64
           sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-          
-          # Verify installation
-          cloudflared --version
           echo "✅ Cloudflared installed"
 
-      - name: Start Cloudflare Tunnel for VNC
+      - name: Start Cloudflare Tunnel
         run: |
-          echo "🌐 Starting Cloudflare tunnel for VNC..."
+          echo "🔗 Starting Cloudflare tunnel..."
           
-          # Start tunnel for Web VNC (port 6080)
-          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
-          TUNNEL_PID=$!
-          
-          echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
-          
-          # Wait for tunnel to start
+          # Start tunnel in background
+          nohup cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cf.log &
           sleep 10
           
-          # Try to get the tunnel URL
-          echo "🔍 Looking for Cloudflare tunnel URL..."
-          
-          # Multiple attempts to get URL
-          for i in {1..10}; do
-            if [ -f /tmp/cloudflared.log ]; then
-              TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
-              if [ ! -z "$TUNNEL_URL" ]; then
-                echo "✅ Found tunnel URL: $TUNNEL_URL"
-                echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-                echo "VNC_FULL_URL=$TUNNEL_URL/vnc.html" >> $GITHUB_ENV
-                break
-              fi
+          # Try to get URL
+          if [ -f /tmp/cf.log ]; then
+            URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' /tmp/cf.log | head -1)
+            if [ ! -z "$URL" ]; then
+              echo "TUNNEL_URL=$URL" >> $GITHUB_ENV
+              echo "✅ Cloudflare URL: $URL"
+            else
+              echo "⚠️ Could not extract URL, check logs"
             fi
-            sleep 3
-          done
-          
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "⚠️ Could not get tunnel URL automatically"
-            echo "ℹ️ Check the workflow logs for the tunnel URL"
           fi
-          
-          echo "✅ Cloudflare tunnel started"
 
-      - name: Install tmate for SSH backup
-        run: |
-          echo "🔗 Installing tmate for SSH access..."
-          
-          # Install tmate
-          wget -q https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
-          tar -xf tmate-2.4.0-static-linux-amd64.tar.xz
-          sudo mv tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
-          rm -rf tmate-2.4.0-static-linux-amd64*
-          
-          # Generate SSH key
-          mkdir -p ~/.tmate
-          ssh-keygen -t rsa -f ~/.tmate/tmate_key -q -N ""
-          
-          # Start tmate session
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          
-          # Get connection info
-          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          
-          echo "TMATE_SSH=$TMATE_SSH" >> $GITHUB_ENV
-          echo "TMATE_WEB=$TMATE_WEB" >> $GITHUB_ENV
-          
-          echo "✅ tmate ready"
-
-      - name: Display Connection Information
+      - name: Display Connection Info
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║           KALI VNC DESKTOP + CLOUDFLARE TUNNEL              ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "=========================================="
+          echo "       KALI VNC READY!"
+          echo "=========================================="
           echo ""
           
-          # Show Cloudflare tunnel URL
           if [ ! -z "$TUNNEL_URL" ]; then
-            echo "🎯 METHOD 1: WEB VNC via CLOUDFLARE (RECOMMENDED)"
-            echo "   🌐 URL: $TUNNEL_URL/vnc.html"
-            echo "   🔐 Password: kali123"
-            echo ""
-            echo "   🔗 Direct link:"
-            echo "   $TUNNEL_URL/vnc.html"
-            echo ""
-          else
-            echo "🎯 METHOD 1: LOCAL WEB VNC"
-            echo "   🌐 URL: http://localhost:6080/vnc.html"
-            echo "   🔐 Password: kali123"
+            echo "🌐 WEB VNC (CLOUDFLARE):"
+            echo "   URL: $TUNNEL_URL/vnc.html"
+            echo "   Password: kali123"
             echo ""
           fi
           
-          echo "🎯 METHOD 2: DIRECT VNC CLIENT"
-          echo "   🖥️  Server: localhost:5901"
-          echo "   🔐 Password: kali123"
+          echo "🖥️ LOCAL VNC:"
+          echo "   URL: http://localhost:6080/vnc.html"
+          echo "   Password: kali123"
           echo ""
-          
-          echo "🎯 METHOD 3: SSH ACCESS (via tmate)"
-          echo "   💻 SSH Command: $TMATE_SSH"
-          echo "   🌐 Web SSH: https://tmate.io/t/$TMATE_WEB"
+          echo "🔧 DIRECT VNC:"
+          echo "   Server: localhost:5901"
+          echo "   Password: kali123"
           echo ""
-          
-          echo "🔧 INSIDE SSH, ACCESS KALI:"
-          echo "   docker exec -it kali-vnc bash"
-          echo ""
-          
-          echo "🛠️  KALI DESKTOP FEATURES:"
-          echo "   • Full XFCE Desktop Environment"
-          echo "   • Firefox Browser"
-          echo "   • Terminal (Ctrl+Alt+T)"
-          echo "   • Install more tools: apt-get install <tool>"
-          echo ""
-          
-          echo "⚡ QUICK START:"
-          echo "   1. Open browser"
-          if [ ! -z "$TUNNEL_URL" ]; then
-            echo "   2. Go to: $TUNNEL_URL/vnc.html"
-          else
-            echo "   2. Go to: http://localhost:6080/vnc.html"
-          fi
-          echo "   3. Click 'Connect'"
-          echo "   4. Enter password: kali123"
-          echo "   5. You're in Kali Desktop! 🎯"
-          echo ""
-          
-          echo "📊 SERVICE PORTS:"
-          echo "   • Web VNC: 6080"
-          echo "   • Direct VNC: 5901"
-          echo ""
-          
-          echo "⏰ SESSION DURATION: 6 hours"
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          
-          # Show tunnel status
-          echo ""
-          echo "🔍 TUNNEL STATUS:"
-          if ps -p $TUNNEL_PID > /dev/null 2>&1; then
-            echo "   ✅ Cloudflare tunnel: RUNNING"
-            if [ ! -z "$TUNNEL_URL" ]; then
-              echo "   🌐 URL: $TUNNEL_URL"
-            fi
-          else
-            echo "   ❌ Cloudflare tunnel: NOT RUNNING"
-          fi
-          
-          echo ""
-          echo "🐳 CONTAINER STATUS:"
-          docker ps | grep kali-vnc
+          echo "⏰ Duration: 6 hours"
+          echo "=========================================="
 
-      - name: Create Test Page
+      - name: Keep Alive
         run: |
-          # Create a simple test HTML page
-          cat > /tmp/test_vnc.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Kali VNC Access</title>
-              <style>
-                  body { font-family: Arial, sans-serif; margin: 40px; }
-                  .container { max-width: 800px; margin: 0 auto; }
-                  .box { border: 2px solid #4CAF50; padding: 20px; border-radius: 10px; margin: 20px 0; }
-                  .url { background: #f0f0f0; padding: 10px; border-radius: 5px; font-family: monospace; word-break: break-all; }
-                  .btn { background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; }
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <h1>🎯 Kali Linux VNC Access</h1>
-                  <div class="box">
-                      <h2>Access Your Kali Desktop</h2>
-                      <p>Click the button below to access Kali Linux VNC desktop:</p>
-                      <div class="url">$TUNNEL_URL/vnc.html</div>
-                      <p><a href="$TUNNEL_URL/vnc.html" class="btn" target="_blank">🚀 Open Kali VNC</a></p>
-                      <p><strong>Password:</strong> kali123</p>
-                  </div>
-                  <div class="box">
-                      <h3>Connection Details:</h3>
-                      <p><strong>VNC Password:</strong> kali123</p>
-                      <p><strong>SSH Access:</strong> $TMATE_SSH</p>
-                      <p><strong>Session Duration:</strong> 6 hours</p>
-                  </div>
-              </div>
-          </body>
-          </html>
-          EOF
-          
-          # Start a simple HTTP server to display the page
-          python3 -m http.server 8080 --directory /tmp > /tmp/http.log 2>&1 &
-          HTTP_PID=$!
-          echo "HTTP_PID=$HTTP_PID" >> $GITHUB_ENV
-          
-          echo "✅ Test page available at: http://localhost:8080/test_vnc.html"
-
-      - name: Keep Session Alive
-        run: |
-          echo "🟢 Kali VNC session is now LIVE!"
-          echo "You can access it via Cloudflare tunnel"
-          echo ""
-          echo "📡 Tunnel URL: $TUNNEL_URL"
-          echo "🔐 VNC Password: kali123"
-          echo ""
-          echo "⏳ Session will remain active for 6 hours"
-          echo "Press Ctrl+C in these logs to end early"
-          echo ""
-          
-          # Health monitoring
-          for i in {1..21600}; do  # 6 hours
-            if [ $((i % 300)) -eq 0 ]; then  # Every 5 minutes
-              minutes=$((i / 60))
-              hours=$((minutes / 60))
-              minutes=$((minutes % 60))
-              echo "[$(date '+%H:%M:%S')] Active: ${hours}h ${minutes}m"
-              
-              # Check services
-              if ! docker ps | grep -q kali-vnc; then
-                echo "⚠️ Kali container stopped, restarting..."
-                docker start kali-vnc
-              fi
-              
-              if ! ps -p $TUNNEL_PID > /dev/null 2>&1; then
-                echo "⚠️ Cloudflare tunnel stopped, restarting..."
-                nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cloudflared.log 2>&1 &
-                TUNNEL_PID=$!
-                sleep 5
-              fi
-            fi
-            sleep 1
-          done
-          
-          echo "⏰ 6-hour session completed"
+          echo "✅ Session active for 6 hours..."
+          echo "Access Kali VNC using the URLs above"
+          sleep 21600
 
       - name: Cleanup
-        if: always()
         run: |
-          echo "🧹 Cleaning up resources..."
-          
-          # Kill processes
-          kill $TUNNEL_PID 2>/dev/null || true
-          kill $HTTP_PID 2>/dev/null || true
-          
-          # Remove containers
-          docker rm -f kali-vnc 2>/dev/null || true
-          
-          # Clean files
-          rm -rf ~/.tmate /tmp/cloudflared.log /tmp/http.log 2>/dev/null || true
-          
-          echo "✅ Cleanup complete"
+          echo "🧹 Cleaning up..."
+          docker rm -f kali-vnc
+          pkill cloudflared || true

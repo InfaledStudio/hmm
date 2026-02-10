@@ -1,168 +1,46 @@
-name: Kali VNC with Cloudflare Token
+name: Kali VNC Simple
 
 on:
   workflow_dispatch:
     inputs:
-      cloudflare_token:
-        description: 'Cloudflare Tunnel Token (get from Zero Trust dashboard)'
+      cloudflare_url:
+        description: 'Your Cloudflare Tunnel URL (e.g., kali.yourdomain.com)'
         required: true
         type: string
 
 jobs:
-  kali-vnc:
+  kali:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     
     steps:
-      - name: Setup Kali with VNC
+      - name: Start Kali VNC
         run: |
-          echo "🚀 Starting Kali Linux..."
-          
-          # Run Kali with VNC
-          docker run -d \
-            --name kali-vnc \
-            -p 6080:6080 \
-            kalilinux/kali-rolling \
-            bash -c "
-              apt-get update && \
-              apt-get install -y tightvncserver novnc websockify xfce4 && \
-              mkdir -p /root/.vnc && \
-              echo 'kali123' | vncpasswd -f > /root/.vnc/passwd && \
-              echo 'startxfce4 &' > /root/.vnc/xstartup && \
-              chmod +x /root/.vnc/xstartup && \
-              vncserver :1 -geometry 1280x720 && \
-              websockify --web /usr/share/novnc/ 6080 localhost:5901
-            "
-          
-          echo "✅ Kali VNC running on port 6080"
-          echo "VNC Password: kali123"
-
-      - name: Install Cloudflared
+          docker run -d --name kali -p 6080:6080 kalilinux/kali-rolling \
+            bash -c "apt update && apt install -y tightvncserver novnc && \
+            mkdir -p /root/.vnc && echo 'kali123' | vncpasswd -f && \
+            echo 'startxfce4 &' > /root/.vnc/xstartup && chmod +x /root/.vnc/xstartup && \
+            vncserver :1 && websockify 6080 localhost:5901"
+      
+      - name: Show Info
         run: |
-          echo "📦 Installing Cloudflared..."
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
-          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-          echo "✅ Cloudflared installed"
-
-      - name: Configure Cloudflare Tunnel with Token
-        run: |
-          echo "🔧 Setting up Cloudflare tunnel..."
-          
-          # Create credentials file with your token
-          cat > /tmp/cloudflared.json << EOF
-${{ github.event.inputs.cloudflare_token }}
-EOF
-          
-          # Install tunnel service with token
-          sudo cloudflared service install ${{ github.event.inputs.cloudflare_token }}
-          
-          # Start the tunnel
-          sudo systemctl start cloudflared
-          
-          echo "✅ Cloudflare tunnel configured with token"
-          
-          # Wait and get tunnel URL
-          sleep 10
-          
-          # Get tunnel URL
-          sudo cloudflared tunnel list > /tmp/tunnels.txt 2>&1 || true
-          
-          echo "📋 Tunnel status:"
-          cat /tmp/tunnels.txt || echo "Checking tunnels..."
-
-      - name: Create Access Page
-        run: |
-          echo "🌐 Creating access information..."
-          
-          # Try to get active tunnels
-          TUNNEL_INFO=$(sudo cloudflared tunnel list 2>/dev/null | grep -v "ID" | head -1) || true
-          
-          if [ ! -z "$TUNNEL_INFO" ]; then
-            TUNNEL_NAME=$(echo "$TUNNEL_INFO" | awk '{print $2}')
-            TUNNEL_ID=$(echo "$TUNNEL_INFO" | awk '{print $1}')
-            
-            echo "TUNNEL_NAME=$TUNNEL_NAME" >> $GITHUB_ENV
-            echo "TUNNEL_ID=$TUNNEL_ID" >> $GITHUB_ENV
-            
-            # Get tunnel URL
-            sudo cloudflared tunnel route dns $TUNNEL_NAME $TUNNEL_NAME 2>/dev/null || true
-            
-            echo "✅ Tunnel: $TUNNEL_NAME (ID: $TUNNEL_ID)"
-          fi
-
-      - name: Display Connection Information
-        run: |
+          echo "=========================================="
+          echo "KALI VNC READY!"
+          echo "=========================================="
           echo ""
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║           KALI VNC WITH CLOUDFLARE TUNNEL          ║"
-          echo "╚══════════════════════════════════════════════════════╝"
+          echo "🔐 Password: kali123"
           echo ""
-          echo "🔐 VNC PASSWORD: kali123"
+          echo "🌐 Your Cloudflare URL:"
+          echo "https://${{ github.event.inputs.cloudflare_url }}/vnc.html"
           echo ""
-          
-          if [ ! -z "$TUNNEL_NAME" ]; then
-            echo "🌐 CLOUDFLARE TUNNEL:"
-            echo "   Name: $TUNNEL_NAME"
-            echo "   ID: $TUNNEL_ID"
-            echo ""
-            echo "   Your tunnel should be accessible at:"
-            echo "   https://${TUNNEL_NAME}.yourdomain.com"
-            echo "   (Replace 'yourdomain.com' with your actual domain)"
-            echo ""
-          fi
-          
-          echo "📍 LOCAL ACCESS (ALWAYS WORKS):"
-          echo "   🌐 URL: http://localhost:6080/vnc.html"
-          echo "   🔐 Password: kali123"
+          echo "📍 Local URL:"
+          echo "http://localhost:6080/vnc.html"
           echo ""
-          echo "🖥️ DIRECT VNC CLIENT:"
-          echo "   Server: localhost:5901"
-          echo "   Password: kali123"
-          echo ""
-          echo "⚡ QUICK START:"
-          echo "   1. Open browser to: http://localhost:6080/vnc.html"
-          echo "   2. Click 'Connect'"
-          echo "   3. Enter password: kali123"
-          echo "   4. You're in Kali Desktop!"
-          echo ""
-          echo "🔧 TROUBLESHOOTING:"
-          echo "   If Cloudflare tunnel doesn't work, use LOCAL ACCESS"
-          echo "   Check Cloudflare Zero Trust dashboard for tunnel status"
-          echo ""
-          echo "⏰ SESSION DURATION: 6 hours"
-          echo "╔══════════════════════════════════════════════════════╝"
-
-      - name: Keep Session Alive
-        run: |
-          echo "🟢 Kali VNC session active for 6 hours..."
-          echo ""
-          echo "Access via: http://localhost:6080/vnc.html"
-          echo "Password: kali123"
-          echo ""
-          echo "Press Ctrl+C to end early"
-          
-          # Simple countdown
-          for i in {1..21600}; do
-            if [ $((i % 300)) -eq 0 ]; then
-              minutes=$((i / 60))
-              echo "[$(date '+%H:%M:%S')] Active: ${minutes} minutes"
-            fi
-            sleep 1
-          done
-          
-          echo "⏰ Session completed"
-
-      - name: Cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up..."
-          
-          # Stop and remove Kali
-          docker rm -f kali-vnc 2>/dev/null || true
-          
-          # Stop Cloudflare tunnel
-          sudo systemctl stop cloudflared 2>/dev/null || true
-          sudo cloudflared service uninstall 2>/dev/null || true
-          
-          echo "✅ Cleanup complete"
+          echo "⏰ Duration: 6 hours"
+          echo "=========================================="
+      
+      - name: Wait
+        run: sleep 21600
+      
+      - name: Clean
+        run: docker rm -f kali

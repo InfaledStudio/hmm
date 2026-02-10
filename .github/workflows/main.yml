@@ -1,12 +1,13 @@
-name: Kali VNC with Cloudflare
+name: Kali VNC with Domain
 on: workflow_dispatch
 
 jobs:
   kali:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    
     steps:
-      - name: Start Kali
+      - name: Start Kali VNC
         run: |
           docker run -d --name kali -p 6080:6080 kalilinux/kali-rolling \
             bash -c "apt update && apt install -y tightvncserver novnc && \
@@ -20,25 +21,48 @@ jobs:
           chmod +x cloudflared-linux-amd64
           sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
       
-      - name: Setup Cloudflare
+      - name: Start Cloudflare Tunnel
         run: |
-          echo "Cloudflare setup required manually"
-          echo ""
-          echo "1. Your VNC is at: http://localhost:6080/vnc.html"
-          echo "2. Password: kali123"
-          echo ""
-          echo "To setup Cloudflare:"
-          echo "1. Go to Cloudflare Zero Trust"
-          echo "2. Create tunnel pointing to: http://localhost:6080"
+          # Start tunnel and get domain
+          nohup cloudflared tunnel --url http://localhost:6080 2>&1 | tee tunnel.log &
+          sleep 10
+          
+          # Get the trycloudflare.com domain
+          DOMAIN=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1)
+          if [ ! -z "$DOMAIN" ]; then
+            echo "YOUR_DOMAIN=$DOMAIN" >> $GITHUB_ENV
+            echo "✅ Your domain: $DOMAIN"
+          else
+            echo "⚠️ Could not get domain, checking logs..."
+            tail -20 tunnel.log
+          fi
       
-      - name: Show connection
+      - name: Show Domain
         run: |
-          echo "✅ Kali VNC is running!"
-          echo "Local: http://localhost:6080/vnc.html"
-          echo "Password: kali123"
+          echo ""
+          echo "=========================================="
+          echo "       KALI VNC WITH DOMAIN"
+          echo "=========================================="
+          echo ""
+          echo "🌐 YOUR DOMAIN:"
+          if [ ! -z "$YOUR_DOMAIN" ]; then
+            echo "$YOUR_DOMAIN/vnc.html"
+          else
+            echo "Could not get domain, use local access below"
+          fi
+          echo ""
+          echo "🔐 PASSWORD: kali123"
+          echo ""
+          echo "📍 LOCAL ACCESS:"
+          echo "http://localhost:6080/vnc.html"
+          echo ""
+          echo "⏰ DURATION: 6 hours"
+          echo "=========================================="
       
-      - name: Wait
+      - name: Keep alive
         run: sleep 21600
       
-      - name: Clean
-        run: docker rm -f kali
+      - name: Cleanup
+        run: |
+          docker rm -f kali
+          pkill cloudflared || true

@@ -1,48 +1,167 @@
-name: Kali/SSH via tmate
+name: Kali Linux SSH Access
 
-on:
-  workflow_dispatch:
-    inputs:
-      session_type:
-        description: 'Session type'
-        required: true
-        default: 'kali'
-        type: choice
-        options:
-          - kali
-          - ubuntu
-          - debug
-      session_duration:
-        description: 'Session duration in minutes (max 360)'
-        required: false
-        default: '60'
+on: workflow_dispatch
 
 jobs:
-  kali-ssh-session:
+  kali-ssh:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
+    timeout-minutes: 360
     
     steps:
-      - name: Setup tmate session
-        id: tmate
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: true
-          detached: true
-
-      - name: Wait for connection
+      - name: Setup Kali Linux
         run: |
-          echo "SSH session is ready!"
-          echo "=============================================="
-          echo "Connect via SSH using one of these commands:"
-          echo "----------------------------------------------"
-          echo "SSH: ssh ${{ steps.tmate.outputs.ssh }}"
-          echo ""
-          echo "Web SSH: ${{ steps.tmate.outputs.web }}"
-          echo "=============================================="
-          echo ""
-          echo "Session will auto-close after ${{ github.event.inputs.session_duration || '60' }} minutes"
-          echo "Press Ctrl+C here to end session early"
+          echo "🚀 Installing Kali Linux..."
           
-          # Keep alive for specified duration
-          sleep $(( ${{ github.event.inputs.session_duration || '60' }} * 60 ))
+          # Pull Kali image
+          docker pull kalilinux/kali-rolling
+          
+          # Run Kali container with tools
+          docker run -d \
+            --name kali-container \
+            --hostname kali-gh-actions \
+            kalilinux/kali-rolling \
+            /bin/bash -c "apt-get update && apt-get install -y \
+              kali-linux-headless \
+              curl wget git \
+              nmap netcat-traditional \
+              python3 python3-pip \
+              vim nano htop \
+              openssh-server sudo \
+              && echo 'root:kali123' | chpasswd \
+              && sleep infinity"
+          
+          echo "✅ Kali Linux container running"
+          echo "Username: root"
+          echo "Password: kali123"
+
+      - name: Install and setup tmate
+        run: |
+          echo "🔗 Setting up tmate for SSH access..."
+          
+          # Install tmate
+          wget -q https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
+          tar -xf tmate-2.4.0-static-linux-amd64.tar.xz
+          sudo mv tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
+          rm -rf tmate-2.4.0-static-linux-amd64*
+          
+          # Create SSH key for tmate
+          mkdir -p ~/.tmate
+          ssh-keygen -t rsa -f ~/.tmate/tmate_key -q -N ""
+          
+          # Start tmate session
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          # Get connection strings
+          TMATE_SSH=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          TMATE_WEB=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          
+          echo "TMATE_SSH=$TMATE_SSH" >> $GITHUB_ENV
+          echo "TMATE_WEB=$TMATE_WEB" >> $GITHUB_ENV
+          
+          echo "✅ tmate session ready"
+
+      - name: Create access script
+        run: |
+          # Create a script to access Kali from tmate
+          cat > /tmp/access_kali.sh << 'EOF'
+          echo ""
+          echo "=============================================="
+          echo "   WELCOME TO KALI LINUX ON GITHUB ACTIONS"
+          echo "=============================================="
+          echo ""
+          echo "To access Kali Linux, run:"
+          echo "docker exec -it kali-container bash"
+          echo ""
+          echo "Default credentials:"
+          echo "  Username: root"
+          echo "  Password: kali123"
+          echo ""
+          echo "Available tools:"
+          echo "  • nmap -p- localhost"
+          echo "  • nc -lvnp 4444"
+          echo "  • python3 -c 'print(\"Hello Kali\")'"
+          echo "  • apt-get install <any-kali-tool>"
+          echo ""
+          echo "=============================================="
+          EOF
+          
+          # Make script run when user connects via tmate
+          cat > ~/.bashrc << 'EOF'
+          if [ -f /tmp/access_kali.sh ]; then
+            cat /tmp/access_kali.sh
+          fi
+          EOF
+
+      - name: Display connection info
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║               KALI LINUX ACCESS READY                   ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📌 COPY THIS SSH COMMAND:"
+          echo "   $TMATE_SSH"
+          echo ""
+          echo "🌐 OR USE WEB SSH:"
+          echo "   https://tmate.io/t/$TMATE_WEB"
+          echo ""
+          echo "🔓 KALI CREDENTIALS:"
+          echo "   Username: root"
+          echo "   Password: kali123"
+          echo ""
+          echo "🚀 QUICK START:"
+          echo "   1. ssh $TMATE_SSH"
+          echo "   2. docker exec -it kali-container bash"
+          echo "   3. Start using Kali tools!"
+          echo ""
+          echo "🛠️  INSTALL MORE TOOLS:"
+          echo "   apt-get update && apt-get install -y <tool-name>"
+          echo ""
+          echo "📦 PRE-INSTALLED TOOLS:"
+          echo "   • nmap, netcat, curl, wget, git"
+          echo "   • python3, vim, nano, htop"
+          echo "   • kali-linux-headless (base tools)"
+          echo ""
+          echo "⏰ SESSION DURATION: 6 hours max"
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo ""
+          
+          # Also show in a box format
+          echo "┌────────────────────────────────────────────────────────────┐"
+          echo "│              SSH CONNECTION DETAILS                        │"
+          echo "├────────────────────────────────────────────────────────────┤"
+          echo "│ SSH:  $TMATE_SSH"
+          echo "│ WEB:  https://tmate.io/t/$TMATE_WEB"
+          echo "│                                                            │"
+          echo "│ KALI ACCESS: docker exec -it kali-container bash           │"
+          echo "│ USER: root | PASS: kali123                                 │"
+          echo "└────────────────────────────────────────────────────────────┘"
+
+      - name: Keep session alive
+        run: |
+          echo "🟢 Session is now active!"
+          echo "Connected users can access Kali Linux for 6 hours"
+          echo ""
+          echo "📊 Monitoring session..."
+          
+          # Show countdown
+          for i in {1..21600}; do  # 6 hours = 21600 seconds
+            if [ $((i % 300)) -eq 0 ]; then  # Every 5 minutes
+              minutes=$((i / 60))
+              hours=$((minutes / 60))
+              minutes=$((minutes % 60))
+              echo "[$(date '+%H:%M:%S')] Session active: ${hours}h ${minutes}m"
+            fi
+            sleep 1
+          done
+          
+          echo "⏰ Time's up! Session ending."
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up resources..."
+          docker rm -f kali-container 2>/dev/null || true
+          rm -f ~/.tmate/tmate_key* 2>/dev/null || true
+          echo "✅ Cleanup completed"

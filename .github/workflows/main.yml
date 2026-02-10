@@ -228,3 +228,4 @@ python -m websockify --web "C:\noVNC\noVNC-1.4.0" 6080 localhost:3389
           }
           
           Write-Host "⏰ Session completed after 6 hours"
+          

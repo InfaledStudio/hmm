@@ -1,155 +1,129 @@
-name: Kali Linux via SSH
+name: Kali Linux via tmate
 
-on:
-  workflow_dispatch:
-    inputs:
-      session_duration:
-        description: 'Session duration in minutes (max 360)'
-        required: false
-        default: '60'
+on: workflow_dispatch
 
 jobs:
-  kali-docker-ssh:
+  kali-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 370
+    timeout-minutes: 360
     
     steps:
-      - name: Start Kali Linux container
+      - name: Install Kali in Docker (No SSH keys needed)
         run: |
-          # Pull and run Kali Linux with SSH
+          echo "🚀 Setting up Kali Linux environment..."
+          
+          # Pull Kali image
+          docker pull kalilinux/kali-rolling
+          
+          # Create a persistent Kali container
           docker run -d \
-            --name kali-ssh \
-            -p 2222:22 \
-            -e ROOT_PASSWORD=kali \
-            -v /tmp/kali:/home/kali \
-            kalilinux/kali-rolling
+            --name kali-runner \
+            --hostname kali-gha \
+            -v /tmp/kali-data:/root \
+            kalilinux/kali-rolling \
+            sleep infinity
           
-          # Install SSH server and tools
-          docker exec kali-ssh bash -c "
-            apt-get update && apt-get install -y \
-              openssh-server \
-              sudo \
-              net-tools \
-              iputils-ping \
-              curl \
-              wget \
-              vim \
-              git
-          "
+          echo "✅ Kali container created"
           
-          # Enable root SSH login
-          docker exec kali-ssh bash -c "
-            echo 'root:kali' | chpasswd
-            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-            service ssh start
-          "
-          
-          echo "✅ Kali Linux container started"
-          echo "SSH Port: 2222"
-          echo "Username: root"
-          echo "Password: kali"
+          # Install essential tools
+          docker exec kali-runner apt-get update
+          docker exec kali-runner apt-get install -y \
+            curl wget git vim nano \
+            net-tools iputils-ping dnsutils \
+            nmap netcat-traditional socat \
+            python3 python3-pip \
+            jq htop neofetch \
+            openssh-client
 
-      - name: Install and start tmate
+      - name: Install tmate (Direct installation)
         run: |
-          # Install tmate
-          sudo apt-get update
-          sudo apt-get install -y tmate
+          echo "📦 Installing tmate..."
           
-          # Generate SSH key for tmate
-          ssh-keygen -t rsa -f ~/.ssh/id_rsa -q -N ""
+          # Install tmate from official repo
+          wget -q https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz
+          tar -xf tmate-2.4.0-static-linux-amd64.tar.xz
+          sudo mv tmate-2.4.0-static-linux-amd64/tmate /usr/local/bin/
+          
+          echo "✅ tmate installed"
+
+      - name: Generate tmate session
+        run: |
+          echo "🔗 Generating tmate session..."
+          
+          # Generate SSH key for tmate (no GitHub keys needed)
+          mkdir -p ~/.tmate
+          ssh-keygen -t rsa -f ~/.tmate/ssh_key -q -N ""
           
           # Start tmate session
-          echo "=============================================="
-          echo "Starting tmate session for Kali SSH access..."
-          echo "=============================================="
-          
-          # Start tmate and capture the connection strings
-          TMATE_OUTPUT=$(tmate -S /tmp/tmate.sock new-session -d 2>&1)
-          tmate -S /tmp/tmate.sock wait tmate-ready
+          tmate -S ~/.tmate.sock new-session -d
+          tmate -S ~/.tmate.sock wait tmate-ready
           
           # Get connection info
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          WEB_URL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          SSH=$(tmate -S ~/.tmate.sock display -p '#{tmate_ssh}')
+          WEB=$(tmate -S ~/.tmate.sock display -p '#{tmate_web}')
           
-          echo "SSH: $SSH_CMD"
-          echo "Web: $WEB_URL"
+          echo "SSH: $SSH"
+          echo "WEB: $WEB"
           
-          # Store for later
-          echo "SSH_CMD=$SSH_CMD" >> $GITHUB_ENV
-          echo "WEB_URL=$WEB_URL" >> $GITHUB_ENV
+          # Save to environment
+          echo "TMATE_SSH=$SSH" >> $GITHUB_ENV
+          echo "TMATE_WEB=$WEB" >> $GITHUB_ENV
           
-          # Also create a tunnel script
-          cat > /tmp/tunnel_kali.sh << 'EOF'
-          #!/bin/bash
-          echo "Forwarding Kali SSH (localhost:2222) through tmate..."
-          ssh -R 2222:localhost:2222 $SSH_CMD
-          EOF
-          
-          chmod +x /tmp/tunnel_kali.sh
+          echo "✅ tmate session ready"
 
       - name: Display connection instructions
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║           KALI LINUX SSH SESSION READY              ║"
+          echo "║           KALI LINUX SESSION READY                  ║"
           echo "╚══════════════════════════════════════════════════════╝"
           echo ""
-          echo "📌 METHOD 1: Direct SSH to tmate session"
-          echo "   Command: $SSH_CMD"
+          echo "📌 METHOD 1: SSH ACCESS (Recommended)"
+          echo "   Command to copy:"
+          echo "   $TMATE_SSH"
           echo ""
-          echo "📌 METHOD 2: Web-based SSH"
-          echo "   URL: $WEB_URL"
+          echo "📌 METHOD 2: WEB SSH"
+          echo "   Browser URL:"
+          echo "   https://tmate.io/t/$TMATE_WEB"
           echo ""
-          echo "📌 METHOD 3: SSH to Kali Linux (through tunnel)"
-          echo "   After connecting via tmate, run:"
-          echo "   ssh -p 2222 root@localhost"
-          echo "   Password: kali"
+          echo "📦 INSIDE THE SESSION, ACCESS KALI:"
+          echo "   docker exec -it kali-runner bash"
           echo ""
-          echo "📦 KALI CONTAINER INFO:"
-          echo "   IP: localhost"
-          echo "   Port: 2222"
-          echo "   User: root"
-          echo "   Pass: kali"
+          echo "🔧 KALI TOOLS AVAILABLE:"
+          echo "   • nmap, netcat, socat"
+          echo "   • curl, wget, git"
+          echo "   • python3, pip3"
+          echo "   • vim, nano, htop"
           echo ""
-          echo "⏰ SESSION DURATION: ${{ github.event.inputs.session_duration || '60' }} minutes"
+          echo "💡 QUICK START:"
+          echo "   1. ssh $TMATE_SSH"
+          echo "   2. docker exec -it kali-runner bash"
+          echo "   3. Start hacking! 🎯"
           echo ""
-          echo "🔧 Available tools in Kali:"
-          echo "   - nmap, netcat, curl, wget, git, vim"
-          echo "   - Add more with: apt-get install <tool>"
-          echo ""
+          echo "⏰ SESSION DURATION: Up to 6 hours"
           echo "╔══════════════════════════════════════════════════════╗"
-          echo "║   Quick start:                                       ║"
-          echo "║   1. ssh $SSH_CMD                                   ║"
-          echo "║   2. Then: ssh -p 2222 root@localhost               ║"
-          echo "║   3. Password: kali                                 ║"
-          echo "╚══════════════════════════════════════════════════════╝"
 
       - name: Keep session alive
         run: |
-          DURATION=$(( ${{ github.event.inputs.session_duration || '60' }} * 60 ))
-          echo "Session will remain active for $DURATION seconds"
-          echo "Press Ctrl+C to end early"
+          echo "⏳ Session active for 6 hours..."
+          echo "Press Ctrl+C in these logs to end early"
           echo ""
           
-          # Start the tunnel in background
-          /tmp/tunnel_kali.sh &
-          TUNNEL_PID=$!
-          
-          # Keep alive
-          for i in $(seq 1 $DURATION); do
+          # Show countdown
+          for i in {1..360}; do
             if [ $((i % 60)) -eq 0 ]; then
-              MINUTES=$((i / 60))
-              echo "[$(date '+%H:%M:%S')] Active for $MINUTES minute(s)"
+              minutes=$((i / 60))
+              echo "[$(date '+%H:%M:%S')] Active: ${minutes} minute(s)"
             fi
             sleep 1
           done
           
-          echo "⏰ Session time complete"
+          echo "⏰ Time's up! Session ending..."
 
       - name: Cleanup
         if: always()
         run: |
-          echo "Cleaning up..."
-          docker rm -f kali-ssh 2>/dev/null || true
-          killall tmate 2>/dev/null || true
+          echo "🧹 Cleaning up..."
+          docker rm -f kali-runner 2>/dev/null || true
+          rm -rf ~/.tmate 2>/dev/null || true
           echo "✅ Cleanup complete"

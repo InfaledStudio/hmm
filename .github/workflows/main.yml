@@ -1,254 +1,48 @@
-name: Remote Desktop on GitHub Actions
+name: Kali/SSH via tmate
 
-on: 
+on:
   workflow_dispatch:
     inputs:
+      session_type:
+        description: 'Session type'
+        required: true
+        default: 'kali'
+        type: choice
+        options:
+          - kali
+          - ubuntu
+          - debug
       session_duration:
         description: 'Session duration in minutes (max 360)'
         required: false
-        default: '360'
+        default: '60'
 
 jobs:
-  remote-desktop:
-    runs-on: windows-latest
-    timeout-minutes: 370  # Slightly more than max session
+  kali-ssh-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 370
     
     steps:
-      - name: Enable Windows RDP
-        run: |
-          Write-Host "Enabling Windows Remote Desktop..."
-          # Enable RDP
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
-          
-          # Configure firewall
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-          
-          Write-Host "✅ RDP enabled on port 3389"
+      - name: Setup tmate session
+        id: tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          detached: true
 
-      - name: Create Secure RDP User
+      - name: Wait for connection
         run: |
-          # Generate random username and password
-          $random = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_})
-          $username = "gha-$random"
-          $password = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,38) | Get-Random -Count 12 | % {[char]$_})
+          echo "SSH session is ready!"
+          echo "=============================================="
+          echo "Connect via SSH using one of these commands:"
+          echo "----------------------------------------------"
+          echo "SSH: ssh ${{ steps.tmate.outputs.ssh }}"
+          echo ""
+          echo "Web SSH: https://tmate.io/t/${{ steps.tmate.outputs.web }}"
+          echo "=============================================="
+          echo ""
+          echo "Session will auto-close after ${{ github.event.inputs.session_duration || '60' }} minutes"
+          echo "Press Ctrl+C here to end session early"
           
-          Write-Host "Creating user: $username"
-          
-          # Create user
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePassword -AccountNeverExpires -ErrorAction SilentlyContinue
-          
-          # Add to groups
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          
-          # Store credentials in environment for later steps
-          echo "RDP_USERNAME=$username" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
-          
-          Write-Host "✅ User created"
-          Write-Host "Username: $username"
-          Write-Host "Password: $password"
-
-      - name: Download Cloudflared (Multiple Sources)
-        run: |
-          Write-Host "Downloading cloudflared..."
-          
-          # Try multiple reliable sources
-          $sources = @(
-            "https://bin.equinox.io/c/VdrWdbjqyF/cloudflared-stable-windows-amd64.zip",
-            "https://github.com/cloudflare/cloudflared/releases/download/2024.12.0/cloudflared-windows-amd64.exe",
-            "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          )
-          
-          $success = $false
-          foreach ($url in $sources) {
-            try {
-              Write-Host "Trying: $url"
-              
-              if ($url -like "*.zip") {
-                $zipPath = "$env:TEMP\cloudflared.zip"
-                Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -TimeoutSec 30
-                Expand-Archive -Path $zipPath -DestinationPath "C:\" -Force
-                Rename-Item -Path "C:\cloudflared.exe" -NewName "C:\cloudflared.exe" -Force -ErrorAction SilentlyContinue
-              } else {
-                Invoke-WebRequest -Uri $url -OutFile "C:\cloudflared.exe" -UseBasicParsing -TimeoutSec 30
-              }
-              
-              if (Test-Path "C:\cloudflared.exe") {
-                $size = (Get-Item "C:\cloudflared.exe").Length
-                if ($size -gt 10000000) {  # Should be > 10MB
-                  Write-Host "✅ Downloaded successfully ($size bytes)"
-                  $success = $true
-                  break
-                }
-              }
-            } catch {
-              Write-Host "Failed: $($_.Exception.Message)"
-              Continue
-            }
-          }
-          
-          if (-not $success) {
-            # Last resort: Try to use curl if available
-            try {
-              curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -o "C:\cloudflared.exe"
-            } catch {
-              Write-Host "All download attempts failed"
-            }
-          }
-          
-          # Verify final file
-          if (Test-Path "C:\cloudflared.exe") {
-            Write-Host "Cloudflared ready at C:\cloudflared.exe"
-          } else {
-            Write-Host "⚠️ Cloudflared download failed, but RDP is still available locally"
-          }
-
-      - name: Start Cloudflare Tunnel
-        run: |
-          if (Test-Path "C:\cloudflared.exe") {
-            Write-Host "Starting Cloudflare tunnel..."
-            
-            # Start tunnel in background
-            $tunnelScript = @'
-@echo off
-cd /d C:\
-cloudflared.exe tunnel --url tcp://localhost:3389 --logfile C:\tunnel.log 2>&1
-'@
-            
-            Set-Content -Path "C:\start_tunnel.bat" -Value $tunnelScript
-            
-            Start-Process -FilePath "cmd.exe" `
-              -ArgumentList "/c start C:\start_tunnel.bat" `
-              -WindowStyle Hidden
-            
-            # Wait for tunnel to start
-            Start-Sleep -Seconds 10
-            
-            # Try to get tunnel URL
-            if (Test-Path "C:\tunnel.log") {
-              Write-Host "--- Tunnel Log (looking for URL) ---"
-              $logContent = Get-Content "C:\tunnel.log" -Tail 20
-              $logContent | ForEach-Object { 
-                if ($_ -match "trycloudflare\.com") {
-                  Write-Host "🔗 TUNNEL URL: $_"
-                  # Extract just the URL
-                  $url = $_ -replace ".*(https://[^ ]+\.trycloudflare\.com).*", '$1'
-                  echo "RDP_TUNNEL_URL=$url" | Out-File -FilePath $env:GITHUB_ENV -Append
-                }
-              }
-            }
-          } else {
-            Write-Host "⚠️ No cloudflared, RDP only available locally"
-          }
-
-      - name: Display Connection Information
-        run: |
-          Write-Host ""
-          Write-Host "═" * 50
-          Write-Host "          REMOTE DESKTOP READY"
-          Write-Host "═" * 50
-          Write-Host ""
-          Write-Host "📋 CONNECTION METHOD 1: Direct RDP (Local)"
-          Write-Host "   Host: localhost:3389"
-          Write-Host "   Username: $env:RDP_USERNAME"
-          Write-Host "   Password: $env:RDP_PASSWORD"
-          Write-Host ""
-          
-          if ($env:RDP_TUNNEL_URL) {
-            Write-Host "📋 CONNECTION METHOD 2: Cloudflare Tunnel"
-            Write-Host "   URL: $env:RDP_TUNNEL_URL"
-            Write-Host "   Username: $env:RDP_USERNAME"
-            Write-Host "   Password: $env:RDP_PASSWORD"
-            Write-Host ""
-            Write-Host "   To connect via tunnel:"
-            Write-Host "   1. Download cloudflared from https://github.com/cloudflare/cloudflared"
-            Write-Host "   2. Run: cloudflared access rdp --hostname $env:RDP_TUNNEL_URL"
-          }
-          
-          Write-Host ""
-          Write-Host "🛠️  SYSTEM INFORMATION:"
-          Write-Host "   Hostname: $env:COMPUTERNAME"
-          Write-Host "   IP Address:"
-          ipconfig | findstr "IPv4" | findstr "10\."
-          
-          Write-Host ""
-          Write-Host "🔒 SECURITY NOTE:"
-          Write-Host "   - This session will auto-terminate after ${{ github.event.inputs.session_duration || '360' }} minutes"
-          Write-Host "   - Credentials are randomly generated each run"
-          Write-Host "   - Connection is via GitHub Actions runner"
-          Write-Host ""
-          Write-Host "═" * 50
-
-      - name: Keep Session Alive
-        run: |
-          $duration = ${{ github.event.inputs.session_duration || 360 }}
-          Write-Host "Keeping session alive for $duration minutes..."
-          Write-Host "Press Ctrl+C in the runner logs to terminate early"
-          Write-Host ""
-          
-          $endTime = (Get-Date).AddMinutes($duration)
-          $checkCount = 0
-          
-          while ((Get-Date) -lt $endTime) {
-            $remaining = $endTime - (Get-Date)
-            $minutes = [math]::Round($remaining.TotalMinutes, 1)
-            
-            $checkCount++
-            
-            # Display status every minute
-            if ($checkCount % 1 -eq 0) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active - $minutes minutes remaining"
-            }
-            
-            # Check RDP service every 5 minutes
-            if ($checkCount % 5 -eq 0) {
-              $rdpService = Get-Service TermService -ErrorAction SilentlyContinue
-              if ($rdpService.Status -ne "Running") {
-                Write-Host "Restarting RDP service..."
-                Start-Service TermService
-              }
-              
-              # Check tunnel if enabled
-              if (Test-Path "C:\cloudflared.exe") {
-                $cfProcess = Get-Process cloudflared -ErrorAction SilentlyContinue
-                if (-not $cfProcess) {
-                  Write-Host "Restarting tunnel..."
-                  Start-Process -FilePath "C:\cloudflared.exe" `
-                    -ArgumentList "tunnel --url tcp://localhost:3389" `
-                    -WindowStyle Hidden
-                }
-              }
-            }
-            
-            # Show connections every 10 minutes
-            if ($checkCount % 10 -eq 0) {
-              $connections = netstat -an | findstr ":3389" | findstr "ESTABLISHED"
-              if ($connections) {
-                Write-Host "Active RDP connections: $(@($connections).Count)"
-              }
-            }
-            
-            Start-Sleep -Seconds 60
-          }
-          
-          Write-Host "⏰ Session completed after $duration minutes"
-
-      - name: Cleanup
-        if: always()
-        run: |
-          Write-Host "Cleaning up..."
-          
-          # Disable RDP
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
-          
-          # Remove firewall rule
-          netsh advfirewall firewall delete rule name="RDP" -ErrorAction SilentlyContinue
-          
-          # Kill cloudflared
-          Stop-Process -Name cloudflared -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✅ Cleanup complete"
+          # Keep alive for specified duration
+          sleep $(( ${{ github.event.inputs.session_duration || '60' }} * 60 ))

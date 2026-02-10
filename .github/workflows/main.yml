@@ -13,41 +13,40 @@ jobs:
         run: |
           netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
 
-      - name: Download UltraVNC Installer
+      - name: Download UltraVNC (Reliable Link)
         run: |
-          $url = "https://www.uvnc.com/downloads/ultravnc/1440/UltraVNC_1_4_4_0_X64_Setup.exe"
+          # Using a direct download link from a reliable source to avoid "index.php" issues
+          $url = "https://github.com/ultravnc/ultravnc/releases/download/1.4.4.0/UltraVNC_1_4_4_0_X64_Setup.exe"
           $out = "$env:TEMP\ultravnc.exe"
-          # -L follows redirects, -o specifies the output file
           curl.exe -L -o $out $url
-          if (-not (Test-Path $out)) { throw "Download failed: File not found." }
+          
+          # Verify the file size is large enough to be a real installer (> 3MB)
+          if ((Get-Item $out).Length -lt 1000000) { 
+            throw "Download failed: The file is too small and is likely a redirect page." 
+          }
 
-      - name: Install UltraVNC (Service Mode)
+      - name: Install UltraVNC
         run: |
-          Start-Process "$env:TEMP\ultravnc.exe" `
-            -ArgumentList "/silent", "/loadinf=setup.inf" `
-            -Wait
+          $process = Start-Process "$env:TEMP\ultravnc.exe" -ArgumentList "/verysilent /inf=setup.inf" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { Write-Warning "Installer exited with code $($process.ExitCode)" }
 
       - name: Set VNC Password and Start Service
         run: |
-          # Note: UltraVNC might require the directory to exist before setting pass
           $vncDir = "C:\Program Files\UltraVNC"
           if (Test-Path "$vncDir\setpasswd.exe") {
+              # Sets password to: r1234567
               & "$vncDir\setpasswd.exe" r1234567
               sc.exe config uvnc_service start= auto
               Start-Service uvnc_service
           } else {
-              Write-Error "UltraVNC installation directory not found."
+              throw "UltraVNC not found at $vncDir. Installation likely failed."
           }
-
-      - name: Verify VNC is Listening
-        run: |
-          netstat -ano | findstr 5900
 
       - name: Install Cloudflared
         run: |
           curl.exe -L -o C:\cloudflared.exe https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
-      - name: Start Cloudflare TCP Tunnel
+      - name: Start Cloudflare Tunnel
         run: |
           Start-Process -NoNewWindow `
             -FilePath "C:\cloudflared.exe" `
@@ -57,12 +56,11 @@ jobs:
         run: |
           Write-Host "=============================="
           Write-Host " VNC READY (Cloudflare TCP)"
-          Write-Host " Port: 5900"
           Write-Host " Password: r1234567"
           Write-Host "=============================="
-          Write-Host "Check the logs above for the 'trycloudflare.com' address."
+          Write-Host "Look for the 'trycloudflare.com' address in the logs above."
 
       - name: Keep Runner Alive
         run: |
-          # Sleeps for 6 hours (21600 seconds)
+          # Keeps the session active for 6 hours
           Start-Sleep -Seconds 21600

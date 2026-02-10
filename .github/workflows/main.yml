@@ -1,231 +1,254 @@
-name: VNCon
+name: Remote Desktop on GitHub Actions
 
 on: 
   workflow_dispatch:
+    inputs:
+      session_duration:
+        description: 'Session duration in minutes (max 360)'
+        required: false
+        default: '360'
 
 jobs:
-  secure-vnc:
+  remote-desktop:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 370  # Slightly more than max session
     
     steps:
-      - name: Allow RDP Firewall
+      - name: Enable Windows RDP
         run: |
-          # Enable Windows Remote Desktop (RDP) instead of VNC
+          Write-Host "Enabling Windows Remote Desktop..."
+          # Enable RDP
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # Configure firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          
+          Write-Host "✅ RDP enabled on port 3389"
 
-      - name: Create User and Set Password
+      - name: Create Secure RDP User
         run: |
-          # Create a new user for RDP access
-          $username = "runneradmin"
-          $password = "R1234567!"  # Strong password
+          # Generate random username and password
+          $random = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_})
+          $username = "gha-$random"
+          $password = -join ((65..90) + (97..122) + (48..57) + (33,35,36,37,38) | Get-Random -Count 12 | % {[char]$_})
           
-          # Check if user exists
-          $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          Write-Host "Creating user: $username"
           
-          if (-not $userExists) {
-            # Create new user
-            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-            New-LocalUser -Name $username -Password $securePassword -AccountNeverExpires
-            Add-LocalGroupMember -Group "Administrators" -Member $username
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-            Write-Host "Created new user: $username"
-          } else {
-            # Update password for existing user
-            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-            Set-LocalUser -Name $username -Password $securePassword
-            Write-Host "Updated password for existing user: $username"
-          }
+          # Create user
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePassword -AccountNeverExpires -ErrorAction SilentlyContinue
           
-          # Also enable the default runner user for RDP
-          $runnerUser = $env:USERNAME
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $runnerUser -ErrorAction SilentlyContinue
+          # Add to groups
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
           
-          Write-Host "RDP Username: $username"
-          Write-Host "RDP Password: $password"
+          # Store credentials in environment for later steps
+          echo "RDP_USERNAME=$username" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
+          
+          Write-Host "✅ User created"
+          Write-Host "Username: $username"
+          Write-Host "Password: $password"
 
-      - name: Install Cloudflared (Alternative Method)
+      - name: Download Cloudflared (Multiple Sources)
         run: |
-          Write-Host "Installing Cloudflared..."
+          Write-Host "Downloading cloudflared..."
           
-          # Method 1: Try direct download from Cloudflare CDN
-          try {
-            $url = "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-            Invoke-WebRequest -Uri $url -OutFile "C:\cloudflared.exe" -UserAgent "Mozilla/5.0" -UseBasicParsing
-          } catch {
-            Write-Host "Method 1 failed, trying Method 2..."
-            # Method 2: Use GitHub API to get latest release
-            $apiUrl = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
-            $releaseInfo = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
-            $downloadUrl = $releaseInfo.assets | Where-Object { $_.name -eq "cloudflared-windows-amd64.exe" } | Select-Object -First 1
-            Invoke-WebRequest -Uri $downloadUrl.browser_download_url -OutFile "C:\cloudflared.exe" -UseBasicParsing
-          }
-          
-          if (Test-Path "C:\cloudflared.exe") {
-            Write-Host "✅ Cloudflared downloaded successfully"
-            # Make executable
-            icacls "C:\cloudflared.exe" /grant "Everyone:RX"
-          } else {
-            # Method 3: Download from another source
-            Write-Host "Trying alternative download source..."
-            $altUrl = "https://bin.equinox.io/c/VdrWdbjqyF/cloudflared-stable-windows-amd64.exe"
-            Invoke-WebRequest -Uri $altUrl -OutFile "C:\cloudflared.exe" -UseBasicParsing
-          }
-
-      - name: Start RDP via Cloudflare Tunnel
-        run: |
-          Write-Host "Starting Cloudflare tunnel for RDP (port 3389)..."
-          
-          # Start cloudflared tunnel for RDP
-          $tunnelArgs = @(
-            "tunnel",
-            "--url", "tcp://localhost:3389",
-            "--logfile", "C:\cf_tunnel.log",
-            "--metrics", "localhost:49589"
+          # Try multiple reliable sources
+          $sources = @(
+            "https://bin.equinox.io/c/VdrWdbjqyF/cloudflared-stable-windows-amd64.zip",
+            "https://github.com/cloudflare/cloudflared/releases/download/2024.12.0/cloudflared-windows-amd64.exe",
+            "https://ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
           )
           
-          Start-Process -FilePath "C:\cloudflared.exe" `
-            -ArgumentList $tunnelArgs `
-            -NoNewWindow `
-            -RedirectStandardOutput "C:\cf_output.log"
-          
-          # Wait for tunnel to initialize
-          Start-Sleep -Seconds 10
-          
-          # Try to get tunnel URL
-          if (Test-Path "C:\cf_output.log") {
-            Write-Host "--- Cloudflared Output ---"
-            Get-Content "C:\cf_output.log" -Tail 10 | ForEach-Object { 
-              if ($_ -match "trycloudflare.com") {
-                Write-Host "✅ Tunnel URL found: $_"
+          $success = $false
+          foreach ($url in $sources) {
+            try {
+              Write-Host "Trying: $url"
+              
+              if ($url -like "*.zip") {
+                $zipPath = "$env:TEMP\cloudflared.zip"
+                Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -TimeoutSec 30
+                Expand-Archive -Path $zipPath -DestinationPath "C:\" -Force
+                Rename-Item -Path "C:\cloudflared.exe" -NewName "C:\cloudflared.exe" -Force -ErrorAction SilentlyContinue
+              } else {
+                Invoke-WebRequest -Uri $url -OutFile "C:\cloudflared.exe" -UseBasicParsing -TimeoutSec 30
               }
-              Write-Host $_
+              
+              if (Test-Path "C:\cloudflared.exe") {
+                $size = (Get-Item "C:\cloudflared.exe").Length
+                if ($size -gt 10000000) {  # Should be > 10MB
+                  Write-Host "✅ Downloaded successfully ($size bytes)"
+                  $success = $true
+                  break
+                }
+              }
+            } catch {
+              Write-Host "Failed: $($_.Exception.Message)"
+              Continue
             }
           }
-
-      - name: Install Alternative VNC Viewer (Optional)
-        run: |
-          # Install a VNC viewer for testing (not server)
-          Write-Host "Installing VNC Viewer for testing..."
           
-          # RealVNC Viewer (free for personal use)
-          $vncViewerUrl = "https://downloads.realvnc.com/download/file/viewer.files/VNC-Viewer-7.11.0-Windows-64bit.exe"
-          Invoke-WebRequest -Uri $vncViewerUrl -OutFile "$env:TEMP\vncviewer.exe" -UseBasicParsing
+          if (-not $success) {
+            # Last resort: Try to use curl if available
+            try {
+              curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -o "C:\cloudflared.exe"
+            } catch {
+              Write-Host "All download attempts failed"
+            }
+          }
           
-          if (Test-Path "$env:TEMP\vncviewer.exe") {
-            Write-Host "VNC Viewer downloaded for testing"
+          # Verify final file
+          if (Test-Path "C:\cloudflared.exe") {
+            Write-Host "Cloudflared ready at C:\cloudflared.exe"
+          } else {
+            Write-Host "⚠️ Cloudflared download failed, but RDP is still available locally"
           }
 
-      - name: Show Connection Information
+      - name: Start Cloudflare Tunnel
         run: |
-          Write-Host ""
-          Write-Host "================================================"
-          Write-Host "           REMOTE DESKTOP READY"
-          Write-Host "================================================"
-          Write-Host ""
-          Write-Host "PROTOCOL: Windows RDP (Remote Desktop Protocol)"
-          Write-Host "PORT: 3389 (via Cloudflare tunnel)"
-          Write-Host ""
-          Write-Host "CREDENTIALS:"
-          Write-Host "  Option 1 (Recommended):"
-          Write-Host "    Username: runneradmin"
-          Write-Host "    Password: R1234567!"
-          Write-Host ""
-          Write-Host "  Option 2:"
-          Write-Host "    Username: $env:USERNAME"
-          Write-Host "    Password: [Check workflow logs for generated password]"
-          Write-Host ""
-          Write-Host "CONNECTION:"
-          Write-Host "  Use Microsoft Remote Desktop Client or any RDP client"
-          Write-Host "  Connect to the Cloudflare tunnel URL (see logs above)"
-          Write-Host ""
-          Write-Host "SERVICE STATUS:"
-          Write-Host "  RDP Service: Enabled"
-          Get-Service TermService | Format-Table Name, Status -AutoSize
-          Write-Host ""
-          Write-Host "NETWORK PORTS:"
-          netstat -an | findstr ":3389" | findstr "LISTENING"
-          Write-Host ""
-          Write-Host "================================================"
-          Write-Host "  Note: This session will auto-terminate after 6 hours"
-          Write-Host "================================================"
-
-      - name: Install and Start NoVNC (Web-based VNC Alternative)
-        run: |
-          # Optional: Set up a web-based VNC client using noVNC
-          Write-Host "Setting up noVNC web interface..."
-          
-          # Download noVNC
-          $novncUrl = "https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.zip"
-          $novncZip = "$env:TEMP\novnc.zip"
-          $novncDir = "C:\noVNC"
-          
-          Invoke-WebRequest -Uri $novncUrl -OutFile $novncZip -UseBasicParsing
-          
-          # Extract noVNC
-          Expand-Archive -Path $novncZip -DestinationPath $novncDir -Force
-          
-          # Create a simple websocket proxy batch file
-          $batchContent = @'
+          if (Test-Path "C:\cloudflared.exe") {
+            Write-Host "Starting Cloudflare tunnel..."
+            
+            # Start tunnel in background
+            $tunnelScript = @'
 @echo off
-echo Starting noVNC websocket proxy...
-python -m websockify --web "C:\noVNC\noVNC-1.4.0" 6080 localhost:3389
+cd /d C:\
+cloudflared.exe tunnel --url tcp://localhost:3389 --logfile C:\tunnel.log 2>&1
 '@
+            
+            Set-Content -Path "C:\start_tunnel.bat" -Value $tunnelScript
+            
+            Start-Process -FilePath "cmd.exe" `
+              -ArgumentList "/c start C:\start_tunnel.bat" `
+              -WindowStyle Hidden
+            
+            # Wait for tunnel to start
+            Start-Sleep -Seconds 10
+            
+            # Try to get tunnel URL
+            if (Test-Path "C:\tunnel.log") {
+              Write-Host "--- Tunnel Log (looking for URL) ---"
+              $logContent = Get-Content "C:\tunnel.log" -Tail 20
+              $logContent | ForEach-Object { 
+                if ($_ -match "trycloudflare\.com") {
+                  Write-Host "🔗 TUNNEL URL: $_"
+                  # Extract just the URL
+                  $url = $_ -replace ".*(https://[^ ]+\.trycloudflare\.com).*", '$1'
+                  echo "RDP_TUNNEL_URL=$url" | Out-File -FilePath $env:GITHUB_ENV -Append
+                }
+              }
+            }
+          } else {
+            Write-Host "⚠️ No cloudflared, RDP only available locally"
+          }
+
+      - name: Display Connection Information
+        run: |
+          Write-Host ""
+          Write-Host "═" * 50
+          Write-Host "          REMOTE DESKTOP READY"
+          Write-Host "═" * 50
+          Write-Host ""
+          Write-Host "📋 CONNECTION METHOD 1: Direct RDP (Local)"
+          Write-Host "   Host: localhost:3389"
+          Write-Host "   Username: $env:RDP_USERNAME"
+          Write-Host "   Password: $env:RDP_PASSWORD"
+          Write-Host ""
           
-          Set-Content -Path "$env:TEMP\start_novnc.bat" -Value $batchContent
+          if ($env:RDP_TUNNEL_URL) {
+            Write-Host "📋 CONNECTION METHOD 2: Cloudflare Tunnel"
+            Write-Host "   URL: $env:RDP_TUNNEL_URL"
+            Write-Host "   Username: $env:RDP_USERNAME"
+            Write-Host "   Password: $env:RDP_PASSWORD"
+            Write-Host ""
+            Write-Host "   To connect via tunnel:"
+            Write-Host "   1. Download cloudflared from https://github.com/cloudflare/cloudflared"
+            Write-Host "   2. Run: cloudflared access rdp --hostname $env:RDP_TUNNEL_URL"
+          }
           
-          Write-Host "noVNC setup complete. Use with: python -m websockify 6080 localhost:3389"
+          Write-Host ""
+          Write-Host "🛠️  SYSTEM INFORMATION:"
+          Write-Host "   Hostname: $env:COMPUTERNAME"
+          Write-Host "   IP Address:"
+          ipconfig | findstr "IPv4" | findstr "10\."
+          
+          Write-Host ""
+          Write-Host "🔒 SECURITY NOTE:"
+          Write-Host "   - This session will auto-terminate after ${{ github.event.inputs.session_duration || '360' }} minutes"
+          Write-Host "   - Credentials are randomly generated each run"
+          Write-Host "   - Connection is via GitHub Actions runner"
+          Write-Host ""
+          Write-Host "═" * 50
 
       - name: Keep Session Alive
         run: |
-          Write-Host "Session active for 6 hours..."
-          Write-Host "Monitoring services every 60 seconds..."
+          $duration = ${{ github.event.inputs.session_duration || 360 }}
+          Write-Host "Keeping session alive for $duration minutes..."
+          Write-Host "Press Ctrl+C in the runner logs to terminate early"
+          Write-Host ""
           
-          $endTime = (Get-Date).AddHours(6)
-          $heartbeatFile = "C:\heartbeat.txt"
+          $endTime = (Get-Date).AddMinutes($duration)
+          $checkCount = 0
           
           while ((Get-Date) -lt $endTime) {
             $remaining = $endTime - (Get-Date)
-            $hours = [math]::Floor($remaining.TotalHours)
-            $minutes = [math]::Floor($remaining.TotalMinutes % 60)
+            $minutes = [math]::Round($remaining.TotalMinutes, 1)
             
-            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Time remaining: ${hours}h ${minutes}m"
+            $checkCount++
             
-            # Update heartbeat file
-            Set-Content -Path $heartbeatFile -Value "Last heartbeat: $(Get-Date)"
-            
-            # Check cloudflared process
-            $cfProcess = Get-Process cloudflared -ErrorAction SilentlyContinue
-            if (-not $cfProcess) {
-              Write-Host "Restarting cloudflared tunnel..."
-              Start-Process -FilePath "C:\cloudflared.exe" `
-                -ArgumentList "tunnel --url tcp://localhost:3389" `
-                -NoNewWindow
+            # Display status every minute
+            if ($checkCount % 1 -eq 0) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active - $minutes minutes remaining"
             }
             
-            # Show tunnel status every 5 minutes
-            if ((Get-Date).Minute % 5 -eq 0) {
-              if (Test-Path "C:\cf_output.log") {
-                $lines = Get-Content "C:\cf_output.log" -Tail 3
-                if ($lines) {
-                  Write-Host "Tunnel status:"
-                  $lines | ForEach-Object { Write-Host "  $_" }
+            # Check RDP service every 5 minutes
+            if ($checkCount % 5 -eq 0) {
+              $rdpService = Get-Service TermService -ErrorAction SilentlyContinue
+              if ($rdpService.Status -ne "Running") {
+                Write-Host "Restarting RDP service..."
+                Start-Service TermService
+              }
+              
+              # Check tunnel if enabled
+              if (Test-Path "C:\cloudflared.exe") {
+                $cfProcess = Get-Process cloudflared -ErrorAction SilentlyContinue
+                if (-not $cfProcess) {
+                  Write-Host "Restarting tunnel..."
+                  Start-Process -FilePath "C:\cloudflared.exe" `
+                    -ArgumentList "tunnel --url tcp://localhost:3389" `
+                    -WindowStyle Hidden
                 }
               }
             }
             
-            # Show current connections
-            $connections = netstat -an | findstr ":3389" | findstr "ESTABLISHED"
-            if ($connections) {
-              Write-Host "Active RDP connections:"
-              $connections | ForEach-Object { Write-Host "  $_" }
+            # Show connections every 10 minutes
+            if ($checkCount % 10 -eq 0) {
+              $connections = netstat -an | findstr ":3389" | findstr "ESTABLISHED"
+              if ($connections) {
+                Write-Host "Active RDP connections: $(@($connections).Count)"
+              }
             }
             
             Start-Sleep -Seconds 60
           }
           
-          Write-Host "⏰ Session completed after 6 hours"
+          Write-Host "⏰ Session completed after $duration minutes"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          Write-Host "Cleaning up..."
           
+          # Disable RDP
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 1 -ErrorAction SilentlyContinue
+          
+          # Remove firewall rule
+          netsh advfirewall firewall delete rule name="RDP" -ErrorAction SilentlyContinue
+          
+          # Kill cloudflared
+          Stop-Process -Name cloudflared -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ Cleanup complete"

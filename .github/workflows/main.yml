@@ -1,12 +1,12 @@
-name: Kali VNC Simple
+name: Kali VNC with Cloudflare CMD
 
 on:
   workflow_dispatch:
     inputs:
-      cloudflare_url:
-        description: 'Your Cloudflare Tunnel URL (e.g., kali.yourdomain.com)'
-        required: true
-        type: string
+      cloudflare_cmd:
+        description: 'Paste FULL Cloudflare tunnel command (sudo cloudflared service install TOKEN)'
+        required: false
+        default: 'skip'
 
 jobs:
   kali:
@@ -16,31 +16,127 @@ jobs:
     steps:
       - name: Start Kali VNC
         run: |
-          docker run -d --name kali -p 6080:6080 kalilinux/kali-rolling \
-            bash -c "apt update && apt install -y tightvncserver novnc && \
+          echo "🚀 Starting Kali VNC server..."
+          docker run -d --name kali-vnc -p 6080:6080 kalilinux/kali-rolling \
+            bash -c "apt-get update && apt-get install -y tightvncserver novnc websockify && \
             mkdir -p /root/.vnc && echo 'kali123' | vncpasswd -f && \
             echo 'startxfce4 &' > /root/.vnc/xstartup && chmod +x /root/.vnc/xstartup && \
-            vncserver :1 && websockify 6080 localhost:5901"
-      
-      - name: Show Info
+            vncserver :1 -geometry 1280x720 && \
+            websockify --web /usr/share/novnc/ 6080 localhost:5901"
+          
+          echo "✅ Kali VNC running on port 6080"
+          echo "Password: kali123"
+          sleep 5
+
+      - name: Install Cloudflared
         run: |
-          echo "=========================================="
-          echo "KALI VNC READY!"
-          echo "=========================================="
+          echo "📦 Installing cloudflared..."
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+          echo "✅ Cloudflared installed"
+
+      - name: Execute Cloudflare Command
+        if: ${{ github.event.inputs.cloudflare_cmd != 'skip' }}
+        run: |
+          echo "🔧 Executing Cloudflare tunnel command..."
+          echo "Command to execute: ${{ github.event.inputs.cloudflare_cmd }}"
+          
+          # Extract just the token if full command is given
+          CMD="${{ github.event.inputs.cloudflare_cmd }}"
+          
+          # If it's a full command with "sudo cloudflared service install", run it
+          if [[ "$CMD" == *"sudo cloudflared service install"* ]]; then
+            echo "📝 Detected full installation command"
+            # Execute the command
+            eval "$CMD"
+            
+            # Start the service
+            sudo systemctl start cloudflared
+            sudo systemctl enable cloudflared
+            
+            echo "✅ Cloudflare tunnel service installed and started"
+          else
+            # If it's just a token, install with token
+            echo "📝 Detected token only"
+            sudo cloudflared service install "$CMD"
+            sudo systemctl start cloudflared
+            sudo systemctl enable cloudflared
+            echo "✅ Cloudflare tunnel installed with token"
+          fi
+          
+          # Wait and check status
+          sleep 10
+          echo "📊 Tunnel status:"
+          sudo cloudflared tunnel list || echo "Checking tunnels..."
+
+      - name: Show Connection Info
+        run: |
           echo ""
-          echo "🔐 Password: kali123"
+          echo "══════════════════════════════════════════════════════════════"
+          echo "                      KALI VNC READY!"
+          echo "══════════════════════════════════════════════════════════════"
           echo ""
-          echo "🌐 Your Cloudflare URL:"
-          echo "https://${{ github.event.inputs.cloudflare_url }}/vnc.html"
+          
+          if [ "${{ github.event.inputs.cloudflare_cmd }}" != "skip" ]; then
+            echo "🌐 CLOUDFLARE TUNNEL ACTIVE!"
+            echo "   Your VNC is accessible through your Cloudflare tunnel"
+            echo "   Check your Cloudflare Zero Trust dashboard for the URL"
+            echo ""
+          fi
+          
+          echo "📍 LOCAL ACCESS (ALWAYS WORKS):"
+          echo "   🌐 URL: http://localhost:6080/vnc.html"
+          echo "   🔐 Password: kali123"
           echo ""
-          echo "📍 Local URL:"
-          echo "http://localhost:6080/vnc.html"
+          echo "🖥️ DIRECT VNC CLIENT:"
+          echo "   Server: localhost:5901"
+          echo "   Password: kali123"
           echo ""
-          echo "⏰ Duration: 6 hours"
-          echo "=========================================="
-      
-      - name: Wait
-        run: sleep 21600
-      
-      - name: Clean
-        run: docker rm -f kali
+          echo "⚡ QUICK START:"
+          echo "   1. Open browser"
+          echo "   2. Go to: http://localhost:6080/vnc.html"
+          echo "   3. Click 'Connect'"
+          echo "   4. Password: kali123"
+          echo ""
+          echo "🔧 To get Cloudflare tunnel URL:"
+          echo "   1. Go to Cloudflare Zero Trust Dashboard"
+          echo "   2. Navigate to: Access → Tunnels"
+          echo "   3. Find your tunnel and click 'Configure'"
+          echo "   4. Copy the Public Hostname URL"
+          echo ""
+          echo "⏰ SESSION: 6 hours"
+          echo "══════════════════════════════════════════════════════════════"
+
+      - name: Keep alive
+        run: |
+          echo "🟢 Kali VNC session active..."
+          echo ""
+          echo "Access at: http://localhost:6080/vnc.html"
+          echo "Password: kali123"
+          echo ""
+          echo "Press Ctrl+C to end early"
+          
+          for i in {1..21600}; do
+            if [ $((i % 300)) -eq 0 ]; then
+              minutes=$((i / 60))
+              echo "[$(date '+%H:%M:%S')] Active: ${minutes} minutes"
+            fi
+            sleep 1
+          done
+          
+          echo "⏰ Session completed"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up..."
+          docker rm -f kali-vnc 2>/dev/null || true
+          
+          # Stop Cloudflare if installed
+          if [ "${{ github.event.inputs.cloudflare_cmd }}" != "skip" ]; then
+            sudo systemctl stop cloudflared 2>/dev/null || true
+            sudo cloudflared service uninstall 2>/dev/null || true
+          fi
+          
+          echo "✅ Cleanup done"

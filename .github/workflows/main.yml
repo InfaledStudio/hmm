@@ -12,64 +12,115 @@ jobs:
       - name: Allow VNC Firewall
         run: |
           netsh advfirewall firewall add rule name="VNC" dir=in action=allow protocol=TCP localport=5900
+          netsh advfirewall firewall add rule name="VNC-Viewer" dir=in action=allow protocol=TCP localport=5500
 
-      - name: Download UltraVNC (Alternative Source)
+      - name: Download and Install UltraVNC
         run: |
-          # Using a reliable download source
-          $url = "https://www.uvnc.com/downloads/ultravnc/144-downloads.html"
-          # Extract the actual download link from the download page
-          $downloadPage = Invoke-WebRequest -Uri $url -UseBasicParsing
-          # UltraVNC direct download link (updated to a working version)
-          $directUrl = "https://www.uvnc.eu/download/UltraVNC_1440_X64_setup.exe"
+          # Try multiple reliable download sources
+          $downloadAttempts = @(
+            @{
+              Name = "Fosshub Mirror"
+              Url = "https://www.fosshub.com/UltraVNC.html?dwl=UltraVNC_1440_X64_setup.exe"
+            },
+            @{
+              Name = "GitHub Release"
+              Url = "https://github.com/ultravnc/UltraVNC/releases/download/1.4.4.0/UltraVNC_1_4_4_0_X64_Setup.exe"
+            },
+            @{
+              Name = "Softpedia Mirror"
+              Url = "https://dl.softpedia.com/dynpostdownload.php?p=4292&t=0&i=1"
+            }
+          )
+          
           $out = "$env:TEMP\ultravnc.exe"
+          $success = $false
           
-          Write-Host "Downloading from: $directUrl"
-          
-          # Use Invoke-WebRequest with proper headers
-          Invoke-WebRequest -Uri $directUrl -OutFile $out -UserAgent "Mozilla/5.0" -UseBasicParsing
-          
-          # Verify the file
-          $fileInfo = Get-Item $out
-          Write-Host "File size: $($fileInfo.Length) bytes"
-          
-          if ($fileInfo.Length -lt 1000000) { 
-            Write-Warning "File size is small, trying alternative download..."
-            # Alternative download link
-            $altUrl = "https://github.com/ultravnc/UltraVNC/releases/download/1.4.4.0/UltraVNC_1_4_4_0_X64_Setup.exe"
-            Invoke-WebRequest -Uri $altUrl -OutFile $out -UserAgent "Mozilla/5.0" -UseBasicParsing
+          foreach ($attempt in $downloadAttempts) {
+            try {
+              Write-Host "Attempting download from: $($attempt.Name)"
+              Write-Host "URL: $($attempt.Url)"
+              
+              # Clear any existing file
+              Remove-Item $out -ErrorAction SilentlyContinue
+              
+              # Download with different methods
+              try {
+                # Try with curl first
+                curl.exe -L -o $out $attempt.Url --fail --silent
+              } catch {
+                # Fallback to Invoke-WebRequest
+                Invoke-WebRequest -Uri $attempt.Url -OutFile $out -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -UseBasicParsing
+              }
+              
+              # Check if file exists and has reasonable size
+              if (Test-Path $out) {
+                $fileSize = (Get-Item $out).Length
+                Write-Host "Downloaded file size: $fileSize bytes"
+                
+                if ($fileSize -gt 3000000) {  # At least 3MB
+                  Write-Host "✅ Download successful from $($attempt.Name)"
+                  $success = $true
+                  break
+                } else {
+                  Write-Warning "File too small ($fileSize bytes), likely a redirect page"
+                  Remove-Item $out -ErrorAction SilentlyContinue
+                }
+              }
+            } catch {
+              Write-Warning "Download failed from $($attempt.Name): $_"
+            }
           }
           
-          # Final verification
-          if ((Get-Item $out).Length -lt 1000000) { 
-            throw "Download failed: The file is too small and is likely a redirect page." 
+          if (-not $success) {
+            Write-Host "All direct downloads failed, trying alternative approach..."
+            # Alternative: Use Tigervnc instead
+            Write-Host "Switching to TigerVNC as alternative..."
+            $tigerUrl = "https://github.com/TigerVNC/tigervnc/releases/download/v1.13.1/vncviewer64-1.13.1.exe"
+            Invoke-WebRequest -Uri $tigerUrl -OutFile "$env:TEMP\tigervnc.exe" -UseBasicParsing
+            $out = "$env:TEMP\tigervnc.exe"
+            
+            # We'll use a different approach for TigerVNC
+            Write-Host "TigerVNC downloaded, but it's a viewer only. Using different VNC server..."
+            
+            # Use built-in Windows Remote Desktop instead
+            Write-Host "Configuring Windows Remote Desktop as fallback..."
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+            
+            # Generate a random password for the runner user
+            $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | % {[char]$_})
+            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+            $userName = $env:USERNAME
+            Set-LocalUser -Name $userName -Password $securePassword
+            
+            Write-Host "RDP configured. Username: $userName, Password: $password"
+            Write-Host "Note: Using RDP on port 3389 instead of VNC on 5900"
+            return  # Skip VNC-specific steps
           }
-
-      - name: Install UltraVNC
-        run: |
+          
+          # If we got here with UltraVNC, install it
           Write-Host "Installing UltraVNC..."
-          # First try silent install
-          $process = Start-Process "$env:TEMP\ultravnc.exe" -ArgumentList "/verysilent /suppressmsgboxes /norestart" -PassThru -Wait
-          
-          if ($process.ExitCode -ne 0) {
-            Write-Warning "Silent install failed with code $($process.ExitCode), trying with basic flags..."
-            # Try with simpler arguments
-            Start-Process "$env:TEMP\ultravnc.exe" -ArgumentList "/silent" -Wait
+          try {
+            # Try silent install
+            Start-Process $out -ArgumentList "/verysilent /suppressmsgboxes /norestart" -Wait -NoNewWindow
+            Start-Sleep -Seconds 5
+          } catch {
+            Write-Warning "Silent install failed, trying with UI..."
+            Start-Process $out -Wait
           }
-          
-          # Give time for installation to complete
-          Start-Sleep -Seconds 10
 
-      - name: Set VNC Password and Start Service
+      - name: Configure VNC or RDP
         run: |
-          # Check multiple possible installation locations
-          $possiblePaths = @(
+          # Check if we installed UltraVNC
+          $vncDir = $null
+          $possibleVncPaths = @(
             "C:\Program Files\UltraVNC",
             "C:\Program Files (x86)\UltraVNC",
             "C:\Program Files\uvnc bvba\UltraVNC"
           )
           
-          $vncDir = $null
-          foreach ($path in $possiblePaths) {
+          foreach ($path in $possibleVncPaths) {
             if (Test-Path "$path\winvnc.exe") {
               $vncDir = $path
               break
@@ -77,99 +128,146 @@ jobs:
           }
           
           if ($vncDir) {
-            Write-Host "Found UltraVNC at: $vncDir"
+            Write-Host "Configuring UltraVNC..."
             
-            # Set password using the setpasswd utility
-            if (Test-Path "$vncDir\vncpwd.exe") {
-              # First, stop any running VNC service
-              Stop-Service uvnc_service -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 2
-              
-              # Set the password (r1234567)
-              & "$vncDir\vncpwd.exe" -set r1234567
-            }
-            else {
-              # Try to find the setpasswd utility
-              $setpasswdPath = Get-ChildItem -Path $vncDir -Filter "*passwd*.exe" | Select-Object -First 1
-              if ($setpasswdPath) {
-                & $setpasswdPath.FullName r1234567
-              }
+            # Stop any existing service
+            Stop-Service uvnc_service -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
+            # Find password utility
+            $passwdExe = Get-ChildItem -Path $vncDir -Filter "*passwd*.exe" -Recurse | Select-Object -First 1
+            if ($passwdExe) {
+              Write-Host "Setting VNC password using: $($passwdExe.FullName)"
+              & $passwdExe.FullName r1234567
+            } else {
+              # Try to set password directly in registry
+              Write-Host "Setting password via registry..."
+              $securePassword = "r1234567"
+              $hexPassword = [System.BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($securePassword)).Replace("-", "")
+              Set-ItemProperty -Path "HKLM:\SOFTWARE\UltraVNC" -Name "passwd" -Value $hexPassword -ErrorAction SilentlyContinue
             }
             
-            # Configure and start the service
+            # Configure service
+            sc.exe create uvnc_service binPath= "$vncDir\winvnc.exe" -service start= auto DisplayName= "UltraVNC Server"
             sc.exe config uvnc_service start= auto
             Start-Service uvnc_service
             
-            # Verify service is running
-            $service = Get-Service uvnc_service -ErrorAction SilentlyContinue
-            if ($service -and $service.Status -eq "Running") {
-              Write-Host "VNC service is running successfully"
-            } else {
-              # Try to start winvnc directly as fallback
-              Start-Process -FilePath "$vncDir\winvnc.exe" -ArgumentList "-run" -ErrorAction SilentlyContinue
-            }
+            Write-Host "VNC Password: r1234567"
+            Write-Host "VNC Port: 5900"
           } else {
-            Write-Warning "UltraVNC not found in standard locations. Checking for installed programs..."
-            Get-WmiObject Win32_Product | Where-Object {$_.Name -like "*VNC*"} | Format-List Name, Version
-            throw "UltraVNC installation not found"
+            Write-Host "UltraVNC not found, using RDP (already configured in previous step)"
+            Write-Host "RDP Port: 3389"
+            Write-Host "Username: $env:USERNAME"
+            Write-Host "Password was set in previous step"
           }
 
       - name: Install Cloudflared
         run: |
+          Write-Host "Installing Cloudflared..."
           $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          Invoke-WebRequest -Uri $cloudflaredUrl -OutFile "C:\cloudflared.exe" -UseBasicParsing
           
-          # Verify download
-          if (Test-Path "C:\cloudflared.exe") {
-              Write-Host "Cloudflared downloaded successfully"
-          } else {
-              throw "Cloudflared download failed"
+          # Try multiple times
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Invoke-WebRequest -Uri $cloudflaredUrl -OutFile "C:\cloudflared.exe" -UseBasicParsing
+              if (Test-Path "C:\cloudflared.exe") {
+                Write-Host "✅ Cloudflared downloaded successfully"
+                break
+              }
+            } catch {
+              Write-Warning "Attempt $i failed: $_"
+              if ($i -eq 3) { throw "Failed to download cloudflared after 3 attempts" }
+              Start-Sleep -Seconds 2
+            }
           }
 
       - name: Start Cloudflare Tunnel
         run: |
           Write-Host "Starting Cloudflare tunnel..."
-          # Start cloudflared in background
-          $cloudflaredArgs = "tunnel --url tcp://localhost:5900"
-          Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList $cloudflaredArgs -NoNewWindow
           
-          # Wait a moment for tunnel to initialize
-          Start-Sleep -Seconds 5
+          # Determine which port to tunnel
+          $port = 5900  # Default VNC port
+          
+          # Check if VNC service is running
+          $vncService = Get-Service uvnc_service -ErrorAction SilentlyContinue
+          if (-not $vncService -or $vncService.Status -ne "Running") {
+            Write-Host "VNC not running, tunneling RDP instead"
+            $port = 3389
+          }
+          
+          Write-Host "Tunneling port: $port"
+          
+          # Start cloudflared tunnel
+          $cloudflaredArgs = "tunnel --url tcp://localhost:$port --logfile C:\cloudflared.log"
+          Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList $cloudflaredArgs -NoNewWindow -RedirectStandardOutput "C:\cloudflared_output.log"
+          
+          # Wait for tunnel to start
+          Start-Sleep -Seconds 3
+          
+          # Show tunnel info
+          if (Test-Path "C:\cloudflared_output.log") {
+            Get-Content "C:\cloudflared_output.log" -Tail 10 | ForEach-Object { Write-Host "CLOUDFLARED: $_" }
+          }
 
-      - name: Show VNC Info
+      - name: Show Connection Info
         run: |
-          Write-Host "=============================="
-          Write-Host " VNC READY (Cloudflare TCP)"
-          Write-Host " Password: r1234567"
-          Write-Host "=============================="
-          Write-Host "The VNC server should be available through Cloudflare tunnel"
-          Write-Host "Look for the 'trycloudflare.com' address in the logs above"
+          Write-Host "========================================="
+          Write-Host "        REMOTE ACCESS READY"
+          Write-Host "========================================="
+          
+          # Check what service is running
+          $vncService = Get-Service uvnc_service -ErrorAction SilentlyContinue
+          
+          if ($vncService -and $vncService.Status -eq "Running") {
+            Write-Host "Service: UltraVNC"
+            Write-Host "Port: 5900"
+            Write-Host "Password: r1234567"
+          } else {
+            Write-Host "Service: Windows RDP"
+            Write-Host "Port: 3389"
+            Write-Host "Username: $env:USERNAME"
+            Write-Host "Password: (Set in installation step - check logs above)"
+          }
+          
           Write-Host ""
-          Write-Host "Current connections:"
-          netstat -an | findstr ":5900"
+          Write-Host "Cloudflare tunnel is running..."
+          Write-Host "Look for 'trycloudflare.com' address in the cloudflared logs"
+          Write-Host ""
+          Write-Host "Current network status:"
+          netstat -an | findstr "LISTENING" | findstr ":5900 :3389"
           Write-Host ""
           Write-Host "Services status:"
-          Get-Service uvnc_service -ErrorAction SilentlyContinue | Format-List Status, Name
+          Get-Service uvnc_service -ErrorAction SilentlyContinue | Format-Table Name, Status -AutoSize
+          Write-Host "========================================="
 
-      - name: Keep Runner Alive
+      - name: Keep Session Alive
         run: |
-          Write-Host "Keeping the session active for 1 hour..."
-          # Keeps the session active for 1 hour (3600 seconds)
-          $startTime = Get-Date
-          $endTime = $startTime.AddHours(1)
+          Write-Host "Session will remain active for 6 hours..."
+          Write-Host "Monitoring services..."
+          
+          $endTime = (Get-Date).AddHours(6)
           
           while ((Get-Date) -lt $endTime) {
-              $timeLeft = $endTime - (Get-Date)
-              Write-Host "Time remaining: $([math]::Round($timeLeft.TotalMinutes, 1)) minutes"
-              
-              # Check if VNC service is still running
-              $service = Get-Service uvnc_service -ErrorAction SilentlyContinue
-              if ($service.Status -ne "Running") {
-                  Write-Warning "VNC service is not running, attempting to restart..."
-                  Start-Service uvnc_service -ErrorAction SilentlyContinue
-              }
-              
-              Start-Sleep -Seconds 60
+            $remaining = $endTime - (Get-Date)
+            $minutes = [math]::Round($remaining.TotalMinutes, 1)
+            
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Time remaining: ${minutes} minutes"
+            
+            # Check and restart VNC service if needed
+            $vncService = Get-Service uvnc_service -ErrorAction SilentlyContinue
+            if ($vncService -and $vncService.Status -ne "Running") {
+              Write-Host "Restarting VNC service..."
+              Start-Service uvnc_service
+            }
+            
+            # Keep cloudflared running
+            $cloudflaredProcess = Get-Process cloudflared -ErrorAction SilentlyContinue
+            if (-not $cloudflaredProcess) {
+              Write-Host "Restarting cloudflared..."
+              Start-Process -FilePath "C:\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:5900" -NoNewWindow
+            }
+            
+            Start-Sleep -Seconds 60
           }
           
           Write-Host "Session time limit reached"
